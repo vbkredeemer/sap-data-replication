@@ -967,6 +967,24 @@ class ScheduleTab(QWidget):
         self.task_mode.addItems(["sync", "sync_schema", "init_only"])
         win_form.addRow("Aktion:", self.task_mode)
 
+        # Service account options
+        self.task_user = QLineEdit()
+        self.task_user.setPlaceholderText("SYSTEM oder DOMÄNE\\service_user (leer = aktueller User)")
+        win_form.addRow("Ausführen als:", self.task_user)
+
+        self.task_password = QLineEdit()
+        self.task_password.setEchoMode(QLineEdit.Password)
+        self.task_password.setPlaceholderText("Passwort (leer bei SYSTEM)")
+        win_form.addRow("Passwort:", self.task_password)
+
+        self.task_highest = QCheckBox("Mit höchsten Privilegien")
+        self.task_highest.setChecked(True)
+        win_form.addRow("", self.task_highest)
+
+        self.task_run_background = QCheckBox("Auch ausführen, wenn Benutzer nicht angemeldet ist")
+        self.task_run_background.setChecked(True)
+        win_form.addRow("", self.task_run_background)
+
         win_layout.addLayout(win_form)
 
         # Export button
@@ -1180,7 +1198,6 @@ class ScheduleTab(QWidget):
 
     def _export_windows_task(self):
         import subprocess
-        import tempfile
 
         task_name = self.task_name.text().strip()
         if not task_name:
@@ -1190,31 +1207,45 @@ class ScheduleTab(QWidget):
         interval = self.task_interval.currentText()
         mode = self.task_mode.currentText()
         start_time = self.task_time.text().strip()
+        run_user = self.task_user.text().strip().upper()
+        run_password = self.task_password.text()
+        highest_priv = self.task_highest.isChecked()
+        run_background = self.task_run_background.isChecked()
 
         # Get paths
         app_dir = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(app_dir, "config.json")
         python_exe = sys.executable
         script_path = os.path.join(app_dir, "sap_replicate.py")
+        log_dir = os.path.join(app_dir, "logs")
 
-        # Build CLI command
+        # Build CLI command — always log to file
         cli_args = f'--config "{config_path}"'
         if mode == 'sync_schema':
             cli_args += ' --sync-schema-all'
         elif mode == 'init_only':
             cli_args += ' --init-only'
         else:
-            cli_args += ' --window day'  # default to daily delta
+            cli_args += ' --window day'
 
-        # Build .bat file
+        # Build .bat file with logging
         bat_content = f"""@echo off
 REM SAP Data Replication — Auto-generated task: {task_name}
 REM Interval: {interval}
 REM Action: {mode}
 REM Created: {datetime.now().isoformat()}
+REM Runs without GUI — uses CLI client with file logging
 
 cd /d "{app_dir}"
+
+REM Create log directory if not exists
+if not exist "{log_dir}" mkdir "{log_dir}"
+
+REM Run replication with file logging (sap_replicate.py logs to logs/ automatically)
 "{python_exe}" "{script_path}" {cli_args}
+
+REM Exit code is propagated to Task Scheduler
+exit /b %ERRORLEVEL%
 """
 
         bat_path = os.path.join(app_dir, f"{task_name}.bat")
@@ -1226,64 +1257,72 @@ cd /d "{app_dir}"
             return
 
         # Build schtasks command
-        if interval == 'daily':
-            schtasks_cmd = [
-                'schtasks', '/Create', '/TN', task_name,
-                '/TR', f'"{bat_path}"',
-                '/SC', 'DAILY',
-                '/ST', start_time,
-                '/F'  # force overwrite
-            ]
-        elif interval == 'weekly':
-            schtasks_cmd = [
-                'schtasks', '/Create', '/TN', task_name,
-                '/TR', f'"{bat_path}"',
-                '/SC', 'WEEKLY',
-                '/ST', start_time,
-                '/F'
-            ]
-        elif interval == 'hourly':
-            schtasks_cmd = [
-                'schtasks', '/Create', '/TN', task_name,
-                '/TR', f'"{bat_path}"',
-                '/SC', 'HOURLY',
-                '/F'
-            ]
-        else:
-            # every2h, every4h, every6h — use MINUTE with different values
-            minutes = {
-                'every2h': 120,
-                'every4h': 240,
-                'every6h': 360
-            }.get(interval, 120)
-            schtasks_cmd = [
-                'schtasks', '/Create', '/TN', task_name,
-                '/TR', f'"{bat_path}"',
-                '/SC', 'MINUTE',
-                '/MO', str(minutes),
-                '/F'
-            ]
+        schedule_type = {
+            'daily': 'DAILY',
+            'weekly': 'WEEKLY',
+            'hourly': 'HOURLY',
+            'every2h': 'MINUTE',
+            'every4h': 'MINUTE',
+            'every6h': 'MINUTE',
+        }.get(interval, 'DAILY')
+
+        schtasks_cmd = [
+            'schtasks', '/Create', '/TN', task_name,
+            '/TR', f'"{bat_path}"',
+            '/SC', schedule_type,
+            '/F'  # force overwrite
+        ]
+
+        # Add modifier for minute-based intervals
+        if schedule_type == 'MINUTE':
+            minutes = {'every2h': 120, 'every4h': 240, 'every6h': 360}.get(interval, 120)
+            schtasks_cmd.extend(['/MO', str(minutes)])
+
+        # Add start time for daily/weekly
+        if schedule_type in ('DAILY', 'WEEKLY'):
+            schtasks_cmd.extend(['/ST', start_time])
+
+        # Run as user
+        if run_user:
+            schtasks_cmd.extend(['/RU', run_user])
+            if run_password and run_user != 'SYSTEM':
+                schtasks_cmd.extend(['/RP', run_password])
+        elif run_background:
+            # Run as SYSTEM when background is requested but no user specified
+            schtasks_cmd.extend(['/RU', 'SYSTEM'])
+
+        # Highest privileges
+        if highest_priv:
+            schtasks_cmd.extend(['/RL', 'HIGHEST'])
 
         try:
             result = subprocess.run(schtasks_cmd, capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
-                QMessageBox.information(self, "Erfolg",
-                    f"Windows-Aufgabe '{task_name}' wurde erstellt.\n\n"
-                    f".bat-Datei: {bat_path}\n\n"
-                    f"Die Aufgabe läuft automatisch im Windows Task Scheduler.\n"
-                    f"Der GUI-Client muss dafür nicht geöffnet sein.")
+                msg = f"Windows-Aufgabe '{task_name}' wurde erstellt.\n\n"
+                msg += f".bat-Datei: {bat_path}\n"
+                msg += f"Log-Datei:  {log_dir}\\sap_replicate_<datum>.log\n\n"
+                msg += f"Ausführen als: {run_user or 'SYSTEM'}\n"
+                msg += f"Intervall: {interval}\n"
+                if start_time and schedule_type in ('DAILY', 'WEEKLY'):
+                    msg += f"Startzeit: {start_time}\n"
+                msg += f"\nDie Aufgabe läuft automatisch im Windows Task Scheduler.\n"
+                msg += f"Der GUI-Client muss dafür nicht geöffnet sein.\n"
+                msg += f"Logs werden täglich in {log_dir} geschrieben."
+                QMessageBox.information(self, "Erfolg", msg)
             else:
-                # May need admin privileges
                 QMessageBox.warning(self, "Hinweis",
-                    f"Windows-Aufgabe konnte nicht erstellt werden (Admin-Rechte nötig?).\n\n"
-                    f"Bitte als Administrator ausführen oder manuell anlegen:\n\n"
+                    f"Windows-Aufgabe konnte nicht erstellt werden.\n\n"
+                    f"Mögliche Ursachen:\n"
+                    f"- Keine Admin-Rechte (als Administrator ausführen)\n"
+                    f"- Falscher Service-Account oder Passwort\n\n"
                     f".bat-Datei wurde erstellt: {bat_path}\n\n"
                     f"schtasks-Befehl:\n{' '.join(schtasks_cmd)}\n\n"
                     f"Fehler: {result.stderr}")
         except Exception as e:
             QMessageBox.critical(self, "Fehler",
                 f"Windows-Aufgabe konnte nicht erstellt werden:\n{e}\n\n"
-                f".bat-Datei wurde erstellt: {bat_path}")
+                f".bat-Datei wurde erstellt: {bat_path}\n"
+                f"Log-Verzeichnis: {log_dir}")
 
     def closeEvent(self, event):
         self._stop_scheduler()

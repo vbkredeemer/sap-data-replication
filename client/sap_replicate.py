@@ -23,6 +23,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
@@ -42,13 +43,21 @@ except ImportError:
 
 
 # ============================================================================
-# Logging
+# Logging — console + file
 # ============================================================================
+
+_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(_log_dir, exist_ok=True)
+_log_file = os.path.join(_log_dir, f'sap_replicate_{datetime.now().strftime("%Y%m%d")}.log')
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(_log_file, encoding='utf-8'),
+    ]
 )
 log = logging.getLogger('sap_replicate')
 
