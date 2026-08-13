@@ -1,0 +1,3 @@
+# Dependencies
+pyrfc>=2.0
+pyodbc>=5.0

@@ -1,0 +1,53 @@
+{
+  "sap": {
+    "ashost": "sap-prod.firma.de",
+    "sysnr": "10",
+    "client": "100",
+    "user": "RFC_USER",
+    "password": "********",
+    "lang": "EN"
+  },
+  "sql_server": {
+    "connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=SAP_REPL;Trusted_Connection=yes;"
+  },
+  "tables": [
+    {
+      "name": "MARA",
+      "mode": "cdc",
+      "key_fields": "MATNR",
+      "chunk_size": 10000
+    },
+    {
+      "name": "KNA1",
+      "mode": "cdc",
+      "key_fields": "KUNNR",
+      "chunk_size": 10000
+    },
+    {
+      "name": "VBAK",
+      "mode": "timeframe",
+      "delta_field": "AEDAT",
+      "window": "day",
+      "chunk_size": 10000
+    },
+    {
+      "name": "VBAP",
+      "mode": "timeframe",
+      "delta_field": "AEDAT",
+      "window": "day",
+      "chunk_size": 10000
+    },
+    {
+      "name": "ACDOCA",
+      "mode": "timeframe",
+      "delta_field": "AEDAT",
+      "window": "day",
+      "chunk_size": 10000
+    },
+    {
+      "name": "T001W",
+      "mode": "full",
+      "chunk_size": 10000
+    }
+  ]
+}

@@ -1,6 +1,79 @@
 # SAP Data Replication
 
-Konzepte und Architektur für die Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohne kommerzielle Produkte, ohne ODP-RFC, ohne SLT-Lizenz.
+Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohne kommerzielle Produkte, ohne ODP-RFC, ohne SLT-Lizenz.
+
+## Status
+
+**Code ist implementiert** — drei ABAP-Funktionsbausteine + Python-Client-Skript.
+
+## Lösungsansätze
+
+### Ansatz 1: Table CDC (Trigger-basiert)
+- Datenbank-Trigger auf SAP-Quelltabelle → Log-Tabelle → Delta-Abholung
+- Entspricht Theobald Table CDC / Qlik Replicate (Trigger-Modus)
+- Erfasst INSERT, UPDATE, DELETE automatisch
+- [`docs/table-cdc.md`](docs/table-cdc.md)
+
+### Ansatz 2: Zeitfenster-Delta (Trigger-frei)
+- Lädt nur Sätze mit Änderungsdatum im aktuellen Zeitraum (Tag/Monat)
+- Löscht den Zeitraum in der Zieldatenbank und lädt ihn neu
+- Kein Trigger, keine Log-Tabelle, upgrade-sicher
+- [`docs/timeframe-delta.md`](docs/timeframe-delta.md)
+
+### Ansatz 3: Full Load
+- Komplette Tabelle laden (TRUNCATE + INSERT)
+- Für kleine Tabellen oder als Fallback
+- Nutzt `Z_READ_TABLE` mit Chunking (10.000er Blöcke)
+
+## Komponenten
+
+### ABAP-Funktionsbausteine (`abap/`)
+
+| Baustein | Zweck |
+|---|---|
+| `Z_CDC_INIT` | Log-Tabelle + Trigger erzeugen (idempotent, mit Lücken-Erkennung) |
+| `Z_CDC_READ` | Delta abholen (Log JOIN Originaltabelle, mit Chunking) |
+| `Z_CDC_CLEANUP` | Log aufräumen oder CDC komplett entfernen |
+| `Z_READ_TABLE` | Chunked Table Read (aus dem ODBC-Projekt, wird hier vorausgesetzt) |
+
+### Python-Client (`client/`)
+
+| Datei | Zweck |
+|---|---|
+| `sap_replicate.py` | Haupt-Skript: CDC, Timeframe, Full-Load Modi |
+| `config.example.json` | Konfigurationsvorlage |
+| `requirements.txt` | Python-Abhängigkeiten (pyrfc, pyodbc) |
+| `INSTALL.md` | Installationsanleitung |
+
+### Dokumentation (`docs/`)
+
+| Dokument | Inhalt |
+|---|---|
+| `table-cdc.md` | Architektur, Trigger-Syntax, CDC-Zyklus, Performance |
+| `timeframe-delta.md` | Zeitfenster-Logik, Vorteile/Nachteile, Hybrid-Strategie |
+| `data-access.md` | Script (pyrfc) vs. ODBC-Treiber (Linked Server) |
+| `risks-and-maintenance.md` | Trigger-Verlust, Lücken-Erkennung, Nightly-Check, Post-Import-Hook |
+| `comparison.md` | Unser Treiber vs. Qlik vs. Theobald + SAP Note 3255746 |
+
+## Schnellstart
+
+1. SAP-Bausteine installieren (SE37, Funktionsgruppe Z_SQL)
+2. `pip install pyrfc pyodbc`
+3. `config.example.json` kopieren zu `config.json` und anpassen
+4. `python sap_replicate.py --config config.json --init-only` (CDC initialisieren)
+5. `python sap_replicate.py --config config.json --table MARA --mode full` (Erst-Load)
+6. `python sap_replicate.py --config config.json` (Regelmäßiger Sync)
+
+Siehe [`client/INSTALL.md`](client/INSTALL.md) für Details.
+
+## Verwandte Projekte
+
+- **ODBC-Treiber:** https://github.com/vbkredeemer/sap-odbc-abap
+- **JDBC-Treiber:** https://github.com/vbkredeemer/sap-jdbc-abap
+
+## Lizenz
+
+GPL-3.0
 
 ## Ausgangslage
 
