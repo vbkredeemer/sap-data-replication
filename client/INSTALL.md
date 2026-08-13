@@ -22,6 +22,40 @@
 
 ## Installation
 
+### Variante A: GUI-Client (empfohlen)
+
+```cmd
+:: Abhängigkeiten installieren
+pip install -r requirements.txt
+
+:: GUI-Client starten
+python gui_client.py
+
+:: Oder als standalone .exe bauen (optional)
+pip install pyinstaller
+pyinstaller sap_replication_client.spec
+:: → dist\SAPDataReplication.exe
+```
+
+Der GUI-Client hat drei Tabs:
+1. **Verbindungen** — SAP, SQL Server, SSH konfigurieren + testen
+2. **Tabellen** — Tabellen-Liste mit Modus-Konfiguration pro Tabelle
+3. **Ausführen** — Sync starten, CDC initialisieren, Log-Ausgabe
+
+### Variante B: Kommandozeile
+
+```cmd
+:: Abhängigkeiten installieren
+pip install pyrfc pyodbc
+
+:: Konfiguration kopieren und anpassen
+copy config.example.json config.json
+notepad config.json
+
+:: Ausführen
+python sap_replicate.py --config config.json
+```
+
 ### 1. SAP-Funktionsbausteine anlegen
 
 Für jeden Baustein in SE37:

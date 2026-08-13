@@ -49,9 +49,11 @@ Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohn
 
 | Datei | Zweck |
 |---|---|
-| `sap_replicate.py` | Haupt-Skript: CDC, Timeframe, Full-Load Modi |
+| `gui_client.py` | **GUI-Client (PySide6/Qt)** — professioneller Desktop-Client mit 3 Tabs |
+| `sap_replicate.py` | Kommandozeilen-Client: CDC, Timeframe, Full-Load, Flatfile Modi |
 | `config.example.json` | Konfigurationsvorlage |
-| `requirements.txt` | Python-Abhängigkeiten (pyrfc, pyodbc) |
+| `requirements.txt` | Python-Abhängigkeiten (pyrfc, pyodbc, PySide6) |
+| `sap_replication_client.spec` | PyInstaller-Spec für standalone .exe |
 | `INSTALL.md` | Installationsanleitung |
 
 ### Dokumentation (`docs/`)
@@ -66,12 +68,28 @@ Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohn
 
 ## Schnellstart
 
+### GUI-Client (empfohlen)
+1. SAP-Bausteine installieren (SE37, Funktionsgruppe Z_SQL)
+2. `pip install -r requirements.txt` (pyrfc, pyodbc, PySide6)
+3. `python gui_client.py` starten
+4. In "Verbindungen": SAP, SQL Server, SSH konfigurieren + testen
+5. In "Tabellen": Tabellen hinzufügen, Modus pro Tabelle wählen
+6. In "Ausführen": Sync starten
+
+### Kommandozeile
 1. SAP-Bausteine installieren (SE37, Funktionsgruppe Z_SQL)
 2. `pip install pyrfc pyodbc`
 3. `config.example.json` kopieren zu `config.json` und anpassen
 4. `python sap_replicate.py --config config.json --init-only` (CDC initialisieren)
 5. `python sap_replicate.py --config config.json --table MARA --mode full` (Erst-Load)
 6. `python sap_replicate.py --config config.json` (Regelmäßiger Sync)
+
+### Standalone .exe bauen
+```cmd
+pip install pyinstaller
+pyinstaller sap_replication_client.spec
+:: → dist\SAPDataReplication.exe
+```
 
 Siehe [`client/INSTALL.md`](client/INSTALL.md) für Details.
 
