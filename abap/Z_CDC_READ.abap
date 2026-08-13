@@ -255,27 +255,60 @@ FUNCTION Z_CDC_READ.
             WHERE (lv_where).
           IF sy-subrc = 0.
             * Build pipe-delimited row from all fields in ET_FIELDS
+            * Type-aware conversion to MSSQL-compatible formats
             LOOP AT et_fields INTO ls_field_cat.
               ASSIGN COMPONENT ls_field_cat-fieldname OF STRUCTURE ls_dynamic TO <fs_field>.
               IF sy-subrc = 0.
+                CLEAR lv_field_value.
                 CASE ls_field_cat-datatype.
+                  WHEN 'D'.
+                    * SAP DATE YYYYMMDD → MSSQL YYYY-MM-DD
+                    IF <fs_field> IS NOT INITIAL.
+                      DATA(lv_d) = |{ <fs_field> }|.
+                      IF strlen( lv_d ) = 8.
+                        CONCATENATE lv_d(4) '-' lv_d+4(2) '-' lv_d+6(2) INTO lv_field_value.
+                      ELSE.
+                        lv_field_value = lv_d.
+                      ENDIF.
+                    ENDIF.
+                  WHEN 'T'.
+                    * SAP TIME HHMMSS → MSSQL HH:MM:SS
+                    IF <fs_field> IS NOT INITIAL.
+                      DATA(lv_t) = |{ <fs_field> }|.
+                      IF strlen( lv_t ) = 6.
+                        CONCATENATE lv_t(2) ':' lv_t+2(2) ':' lv_t+4(2) INTO lv_field_value.
+                      ELSE.
+                        lv_field_value = lv_t.
+                      ENDIF.
+                    ENDIF.
                   WHEN 'I' OR 'INT1' OR 'INT2'.
-                    lv_field_value = <fs_field>.
+                    lv_field_value = |{ <fs_field> }|.
                     CONDENSE lv_field_value.
                   WHEN 'P'.
-                    lv_field_value = <fs_field>.
-                    CONDENSE lv_field_value.
+                    * Packed decimal with dot, no thousand separators
+                    IF <fs_field> IS NOT INITIAL.
+                      WRITE <fs_field> TO lv_field_value NO-GROUPING.
+                      REPLACE ALL OCCURRENCES OF ',' IN lv_field_value WITH '.'.
+                      CONDENSE lv_field_value.
+                      SHIFT lv_field_value LEFT DELETING LEADING SPACE.
+                    ENDIF.
                   WHEN 'F'.
-                    lv_field_value = <fs_field>.
-                    CONDENSE lv_field_value.
-                  WHEN 'D'.
-                    WRITE <fs_field> TO lv_field_value NO-GROUPING DD/MM/YYYY.
-                    CONDENSE lv_field_value.
-                  WHEN 'T'.
-                    WRITE <fs_field> TO lv_field_value NO-GROUPING.
-                    CONDENSE lv_field_value.
+                    * Float with dot notation
+                    IF <fs_field> IS NOT INITIAL.
+                      WRITE <fs_field> TO lv_field_value NO-GROUPING.
+                      REPLACE ALL OCCURRENCES OF ',' IN lv_field_value WITH '.'.
+                      CONDENSE lv_field_value.
+                      SHIFT lv_field_value LEFT DELETING LEADING SPACE.
+                    ENDIF.
+                  WHEN 'X'.
+                    * RAW → hex string with 0x prefix
+                    DATA(lv_x) = |{ <fs_field> }|.
+                    CONCATENATE '0x' lv_x INTO lv_field_value.
                   WHEN OTHERS.
-                    lv_field_value = <fs_field>.
+                    * CHAR/STRING — remove leading/trailing spaces
+                    lv_field_value = |{ <fs_field> }|.
+                    SHIFT lv_field_value RIGHT DELETING TRAILING space.
+                    SHIFT lv_field_value LEFT DELETING LEADING space.
                 ENDCASE.
                 CONCATENATE lv_rowdata lv_field_value INTO lv_rowdata SEPARATED BY '|'.
               ELSE.

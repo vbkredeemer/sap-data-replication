@@ -65,6 +65,7 @@ Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohn
 | `data-access.md` | Script (pyrfc) vs. ODBC-Treiber (Linked Server) |
 | `risks-and-maintenance.md` | Trigger-Verlust, Lücken-Erkennung, Nightly-Check, Post-Import-Hook |
 | `comparison.md` | Unser Treiber vs. Qlik vs. Theobald + SAP Note 3255746 |
+| `type-conversion.md` | SAP→MSSQL Datentyp-Konvertierung (DATE, TIME, PACKED, RAW, etc.) |
 
 ## Schnellstart
 

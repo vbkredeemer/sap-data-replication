@@ -288,23 +288,133 @@ FUNCTION Z_EXPORT_TABLE.
     ENDIF.
 
     *-------------------------------------------------------------------
-    * Write rows to CSV
+    * Write rows to CSV with type-aware conversion
+    * SAP types are converted to MSSQL-compatible formats:
+    *   DATE (D)  → YYYY-MM-DD        (MSSQL DATE)
+    *   TIME (T)  → HH:MM:SS          (MSSQL TIME)
+    *   PACKED (P)→ Decimal with dot  (MSSQL DECIMAL, no thousand separators)
+    *   INT (I)   → Integer            (MSSQL INT)
+    *   FLOAT (F) → Scientific or decimal (MSSQL FLOAT)
+    *   CHAR (C)  → As-is              (MSSQL VARCHAR/NVARCHAR)
+    *   RAW (X)   → Hex string         (MSSQL VARBINARY — 0x prefixed)
     *-------------------------------------------------------------------
+    * Build field type map for conversion
+    DATA: lt_field_types TYPE TABLE OF abap_componentdescr,
+          ls_field_type  TYPE abap_componentdescr,
+          lv_type_kind   TYPE abap_typekind.
+
+    * Get type info for each export field
+    DATA: lt_type_map TYPE TABLE OF i,  " stores type_kind per field
+          lv_type_idx TYPE i.
+
+    LOOP AT lt_export_fields INTO lv_fieldname.
+      CONDENSE lv_fieldname.
+      READ TABLE lt_components INTO ls_component
+        WITH KEY name = lv_fieldname.
+      IF sy-subrc = 0.
+        APPEND ls_component-type_kind TO lt_type_map.
+      ELSE.
+        APPEND cl_abap_structdescr=>typekind_char TO lt_type_map.
+      ENDIF.
+    ENDLOOP.
+
     LOOP AT <ft_dynamic> ASSIGNING <fs_dynamic>.
       CLEAR lv_row.
+      lv_type_idx = 0.
 
       LOOP AT lt_export_fields INTO lv_fieldname.
         CONDENSE lv_fieldname.
+        lv_type_idx = lv_type_idx + 1.
         ASSIGN COMPONENT lv_fieldname OF STRUCTURE <fs_dynamic> TO <ff_field>.
         IF sy-subrc = 0.
-          DATA(lv_char_val) = |{ <ff_field> }|.
-          CONDENSE lv_char_val.
+          * Get type kind for this field
+          READ TABLE lt_type_map INTO lv_type_kind INDEX lv_type_idx.
+          IF sy-subrc <> 0.
+            lv_type_kind = cl_abap_structdescr=>typekind_char.
+          ENDIF.
+
+          * Type-aware conversion to MSSQL-compatible format
+          CLEAR lv_char_val.
+
+          CASE lv_type_kind.
+            WHEN cl_abap_structdescr=>typekind_date.
+              * SAP DATE: YYYYMMDD → MSSQL: YYYY-MM-DD
+              IF <ff_field> IS NOT INITIAL.
+                DATA(lv_date_str) = |{ <ff_field> ALPHA = IN }|.
+                IF strlen( lv_date_str ) = 8.
+                  CONCATENATE lv_date_str(4) '-' lv_date_str+4(2) '-' lv_date_str+6(2)
+                    INTO lv_char_val.
+                ELSE.
+                  lv_char_val = lv_date_str.
+                ENDIF.
+              ENDIF.
+
+            WHEN cl_abap_structdescr=>typekind_time.
+              * SAP TIME: HHMMSS → MSSQL: HH:MM:SS
+              IF <ff_field> IS NOT INITIAL.
+                DATA(lv_time_str) = |{ <ff_field> }|.
+                IF strlen( lv_time_str ) = 6.
+                  CONCATENATE lv_time_str(2) ':' lv_time_str+2(2) ':' lv_time_str+4(2)
+                    INTO lv_char_val.
+                ELSE.
+                  lv_char_val = lv_time_str.
+                ENDIF.
+              ENDIF.
+
+            WHEN cl_abap_structdescr=>typekind_packed.
+              * SAP PACKED: convert to decimal with dot, no thousand separators
+              IF <ff_field> IS NOT INITIAL.
+                * Write with WRITE and EDIT MASK to get decimal notation
+                WRITE <ff_field> TO lv_char_val NO-GROUPING.
+                * Replace comma with dot (if German locale)
+                REPLACE ALL OCCURRENCES OF ',' IN lv_char_val WITH '.'.
+                CONDENSE lv_char_val.
+                * Remove leading spaces
+                SHIFT lv_char_val LEFT DELETING LEADING SPACE.
+              ENDIF.
+
+            WHEN cl_abap_structdescr=>typekind_int
+              OR cl_abap_structdescr=>typekind_int2
+              OR cl_abap_structdescr=>typekind_int1.
+              * Integer — plain number
+              lv_char_val = |{ <ff_field> }|.
+              CONDENSE lv_char_val.
+
+            WHEN cl_abap_structdescr=>typekind_float.
+              * FLOAT — use scientific or decimal notation with dot
+              IF <ff_field> IS NOT INITIAL.
+                WRITE <ff_field> TO lv_char_val NO-GROUPING.
+                REPLACE ALL OCCURRENCES OF ',' IN lv_char_val WITH '.'.
+                CONDENSE lv_char_val.
+                SHIFT lv_char_val LEFT DELETING LEADING SPACE.
+              ENDIF.
+
+            WHEN cl_abap_structdescr=>typekind_hex.
+              * RAW — convert to hex string with 0x prefix for MSSQL VARBINARY
+              DATA(lv_hex_str) = |{ <ff_field> }|.
+              CONCATENATE '0x' lv_hex_str INTO lv_char_val.
+
+            WHEN cl_abap_structdescr=>typekind_char
+              OR cl_abap_structdescr=>typekind_string.
+              * CHAR/STRING — as-is, but remove trailing spaces
+              lv_char_val = |{ <ff_field> }|.
+              * Don't CONDENSE — preserves internal spaces, only removes trailing
+              SHIFT lv_char_val RIGHT DELETING TRAILING space.
+              SHIFT lv_char_val LEFT DELETING LEADING space.
+
+            WHEN OTHERS.
+              * Fallback: plain string conversion
+              lv_char_val = |{ <ff_field> }|.
+              CONDENSE lv_char_val.
+          ENDCASE.
+
           IF lv_row IS INITIAL.
             lv_row = lv_char_val.
           ELSE.
             CONCATENATE lv_row lv_char_val INTO lv_row SEPARATED BY '|'.
           ENDIF.
         ELSE.
+          * Field not found — empty value
           IF lv_row IS INITIAL.
             lv_row = ''.
           ELSE.
