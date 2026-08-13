@@ -135,6 +135,257 @@ class SqlServerConnection:
 
 
 # ============================================================================
+# Schema Manager — create tables + indexes from SAP metadata
+# ============================================================================
+
+class SchemaManager:
+    """Reads table/index metadata from SAP and creates matching tables in MSSQL."""
+
+    # SAP DDIC type → MSSQL type mapping
+    SAP_TO_MSSQL = {
+        'CHAR': 'NVARCHAR',
+        'STRING': 'NVARCHAR(MAX)',
+        'INT4': 'INT',
+        'INT2': 'SMALLINT',
+        'INT1': 'TINYINT',
+        'NUMC': 'NVARCHAR',  # NUmber as CHAR
+        'PACK': 'DECIMAL',
+        'FLTP': 'FLOAT',
+        'DATS': 'DATE',
+        'TIMS': 'TIME(0)',
+        'RAW': 'VARBINARY',
+        'LRAW': 'VARBINARY(MAX)',
+        'CUKY': 'NVARCHAR',
+        'UNIT': 'NVARCHAR',
+        'DATS_RAW': 'DATE',
+    }
+
+    def __init__(self, sap: SapConnection, sql: SqlServerConnection):
+        self.sap = sap
+        self.sql = sql
+
+    def get_table_fields(self, table: str) -> list:
+        """Read field definitions from SAP DD03L via Z_EXECUTE_SQL."""
+        query = (f"SELECT FIELDNAME, INTTYPE, INTLEN, DECIMALS, KEYFLAG "
+                 f"FROM DD03L WHERE TABNAME = '{table}' "
+                 f"AND FIELDNAME NOT LIKE '.%' "
+                 f"ORDER BY POSITION")
+        result = self.sap.call('Z_EXECUTE_SQL',
+                               IV_SQL=query,
+                               IV_MAX_ROWS=500)
+        if result.get('EV_ERROR'):
+            log.error(f"Cannot read fields for {table}: {result['EV_ERROR']}")
+            return []
+
+        fields = []
+        for row in result.get('ET_DATA', []):
+            parts = row['ROWDATA'].split('|')
+            if len(parts) >= 5:
+                fields.append({
+                    'name': parts[0].strip(),
+                    'inttype': parts[1].strip(),
+                    'length': int(parts[2].strip()) if parts[2].strip().isdigit() else 0,
+                    'decimals': int(parts[3].strip()) if parts[3].strip().isdigit() else 0,
+                    'keyflag': parts[4].strip().upper() == 'X',
+                })
+        return fields
+
+    def get_table_indexes(self, table: str) -> list:
+        """Read index definitions from SAP DD12L + DD17S via Z_EXECUTE_SQL."""
+        # Get index headers
+        query = (f"SELECT INDEXNAME, DBINDEX, UNIQUEFLAG "
+                 f"FROM DD12L WHERE TABNAME = '{table}' "
+                 f"AND AS4LOCAL = 'A' "
+                 f"ORDER BY POSITION")
+        result = self.sap.call('Z_EXECUTE_SQL',
+                               IV_SQL=query,
+                               IV_MAX_ROWS=100)
+        if result.get('EV_ERROR'):
+            log.warning(f"Cannot read indexes for {table}: {result['EV_ERROR']}")
+            return []
+
+        indexes = []
+        for row in result.get('ET_DATA', []):
+            parts = row['ROWDATA'].split('|')
+            if len(parts) >= 3:
+                idx_name = parts[0].strip()
+                db_index = parts[1].strip()
+                unique = parts[2].strip().upper() in ('X', '1', 'U')
+                indexes.append({
+                    'name': idx_name,
+                    'db_name': db_index,
+                    'unique': unique,
+                    'fields': []
+                })
+
+        # Get index fields for each index
+        for idx in indexes:
+            query = (f"SELECT FIELDNAME, ASCDESC "
+                     f"FROM DD17S WHERE TABNAME = '{table}' "
+                     f"AND INDEXNAME = '{idx['name']}' "
+                     f"ORDER BY POSITION")
+            result = self.sap.call('Z_EXECUTE_SQL',
+                                   IV_SQL=query,
+                                   IV_MAX_ROWS=50)
+            if result.get('EV_ERROR'):
+                continue
+            for row in result.get('ET_DATA', []):
+                parts = row['ROWDATA'].split('|')
+                if len(parts) >= 2:
+                    idx['fields'].append({
+                        'fieldname': parts[0].strip(),
+                        'order': parts[1].strip().upper() if len(parts) > 1 else 'ASC',
+                    })
+
+        # Also get primary key from DD03L
+        fields = self.get_table_fields(table)
+        pk_fields = [f['name'] for f in fields if f['keyflag']]
+        if pk_fields:
+            indexes.insert(0, {
+                'name': 'PRIMARY_KEY',
+                'db_name': '__PK__',
+                'unique': True,
+                'fields': [{'fieldname': f, 'order': 'ASC'} for f in pk_fields],
+                'is_primary': True
+            })
+
+        # Mark non-PK indexes
+        for idx in indexes:
+            if 'is_primary' not in idx:
+                idx['is_primary'] = False
+
+        return indexes
+
+    def _sap_type_to_mssql(self, inttype: str, length: int, decimals: int) -> str:
+        """Convert SAP internal type to MSSQL column type."""
+        t = inttype.upper()
+        if t in ('C', 'CHAR'):
+            return f'NVARCHAR({max(length, 1)})'
+        elif t in ('S', 'STRING'):
+            return 'NVARCHAR(MAX)'
+        elif t in ('I', 'INT4', 'INT'):
+            return 'INT'
+        elif t in ('S2', 'INT2'):
+            return 'SMALLINT'
+        elif t in ('B', 'INT1'):
+            return 'TINYINT'
+        elif t in ('N', 'NUMC'):
+            return f'NVARCHAR({max(length, 1)})'
+        elif t in ('P', 'PACK'):
+            prec = max(length, 1)
+            scale = max(decimals, 0)
+            return f'DECIMAL({prec}, {scale})'
+        elif t in ('F', 'FLTP'):
+            return 'FLOAT(53)'
+        elif t in ('D', 'DATS'):
+            return 'DATE'
+        elif t in ('T', 'TIMS'):
+            return 'TIME(0)'
+        elif t in ('X', 'RAW'):
+            return f'VARBINARY({max(length, 1)})'
+        elif t in ('Y', 'LRAW'):
+            return 'VARBINARY(MAX)'
+        else:
+            return f'NVARCHAR({max(length, 1)})'
+
+    def create_table(self, table: str, target_table: str = None,
+                     drop_if_exists: bool = False) -> bool:
+        """Create a table in MSSQL matching the SAP source table structure."""
+        target = target_table or table
+        fields = self.get_table_fields(table)
+
+        if not fields:
+            log.error(f"Cannot create {target}: no fields found for {table}")
+            return False
+
+        # Build CREATE TABLE statement
+        col_defs = []
+        pk_cols = []
+
+        for f in fields:
+            mssql_type = self._sap_type_to_mssql(f['inttype'], f['length'], f['decimals'])
+            col_name = f['name']
+            col_defs.append(f"  [{col_name}] {mssql_type}")
+            if f['keyflag']:
+                pk_cols.append(f"[{col_name}]")
+
+        if pk_cols:
+            col_defs.append(f"  CONSTRAINT [PK_{target}] PRIMARY KEY ({', '.join(pk_cols)})")
+
+        # Drop if exists
+        if drop_if_exists:
+            log.info(f"  Dropping dbo.{target} if exists")
+            self.sql.execute(f"IF OBJECT_ID('dbo.{target}', 'U') IS NOT NULL DROP TABLE dbo.{target}")
+            self.sql.commit()
+
+        create_sql = f"CREATE TABLE dbo.{target} (\n" + ",\n".join(col_defs) + "\n)"
+
+        try:
+            log.info(f"  Creating table dbo.{target} with {len(fields)} columns")
+            self.sql.execute(create_sql)
+            self.sql.commit()
+            log.info(f"  Table dbo.{target} created")
+        except Exception as e:
+            log.error(f"  Cannot create table: {e}")
+            return False
+
+        # Create indexes
+        return self.create_indexes(table, target)
+
+    def create_indexes(self, table: str, target_table: str = None) -> bool:
+        """Create indexes on MSSQL table matching SAP indexes."""
+        target = target_table or table
+        indexes = self.get_table_indexes(table)
+
+        if not indexes:
+            log.info(f"  No indexes found for {table}")
+            return True
+
+        created = 0
+        for idx in indexes:
+            if idx.get('is_primary'):
+                # Primary key already created with table
+                continue
+
+            if not idx['fields']:
+                continue
+
+            # Build index name — sanitize SAP index name for MSSQL
+            idx_name = f"IX_{target}_{idx['name']}"
+            # MSSQL index name max 128 chars
+            idx_name = idx_name[:128]
+
+            col_list = ', '.join(
+                f"[{f['fieldname']}] {f['order']}" for f in idx['fields']
+            )
+
+            unique_str = "UNIQUE " if idx['unique'] else ""
+
+            create_idx_sql = (
+                f"CREATE {unique_str}NONCLUSTERED INDEX [{idx_name}] "
+                f"ON dbo.[{target}] ({col_list})"
+            )
+
+            try:
+                log.info(f"  Creating index {idx_name} on {target} ({col_list})")
+                self.sql.execute(create_idx_sql)
+                self.sql.commit()
+                created += 1
+            except Exception as e:
+                log.warning(f"  Cannot create index {idx_name}: {e}")
+
+        log.info(f"  Created {created} indexes for dbo.{target}")
+        return True
+
+    def sync_schema(self, table: str, target_table: str = None,
+                    drop_if_exists: bool = False) -> bool:
+        """Create table + indexes in MSSQL from SAP metadata."""
+        target = target_table or table
+        log.info(f"SCHEMA SYNC: {table} → dbo.{target}")
+        return self.create_table(table, target, drop_if_exists)
+
+
+# ============================================================================
 # State Management (stores last SEQ per table for CDC)
 # ============================================================================
 
@@ -1015,6 +1266,10 @@ def main():
                         help='Only run Z_CDC_INIT (check triggers, no sync)')
     parser.add_argument('--remove-cdc', metavar='TABLE',
                         help='Remove CDC for a table (triggers + log table)')
+    parser.add_argument('--sync-schema', metavar='TABLE',
+                        help='Create table + indexes in MSSQL from SAP metadata')
+    parser.add_argument('--sync-schema-all', action='store_true',
+                        help='Create tables + indexes for all configured tables')
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -1032,6 +1287,18 @@ def main():
         if args.remove_cdc:
             cdc = CdcReplicator(sap, sql, state)
             cdc.remove_cdc(args.remove_cdc)
+            return
+
+        if args.sync_schema:
+            schema = SchemaManager(sap, sql)
+            schema.sync_schema(args.sync_schema, drop_if_exists=True)
+            return
+
+        if args.sync_schema_all:
+            schema = SchemaManager(sap, sql)
+            for t in config['tables']:
+                target = t.get('target_table', t['name'])
+                schema.sync_schema(t['name'], target, drop_if_exists=True)
             return
 
         if args.init_only:

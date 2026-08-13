@@ -161,7 +161,7 @@ class SyncWorker(QThread):
             from sap_replicate import (
                 SapConnection, SqlServerConnection, StateManager,
                 CdcReplicator, TimeframeReplicator, FullLoadReplicator,
-                FlatfileReplicator, run_table
+                FlatfileReplicator, SchemaManager, run_table
             )
 
             # Connect
@@ -190,6 +190,27 @@ class SyncWorker(QThread):
                         cdc = CdcReplicator(sap, sql, state)
                         cdc.remove_cdc(t['name'])
                         self.progress.emit(t['name'], "Removed")
+                    return
+
+                if self.action == "sync_schema":
+                    schema = SchemaManager(sap, sql)
+                    for t in self.tables_to_sync:
+                        if self._cancel:
+                            break
+                        target = t.get('target_table') or t['name']
+                        self.progress.emit(t['name'], "Creating...")
+                        try:
+                            ok = schema.sync_schema(t['name'], target, drop_if_exists=True)
+                            if ok:
+                                success += 1
+                                self.progress.emit(t['name'], "✓ Schema created")
+                            else:
+                                fail += 1
+                                self.progress.emit(t['name'], "✗ Schema failed")
+                        except Exception as e:
+                            logging.error(f"Schema error for {t['name']}: {e}")
+                            fail += 1
+                            self.progress.emit(t['name'], "✗ Error")
                     return
 
                 # Normal sync
@@ -670,10 +691,20 @@ class RunTab(QWidget):
         self.btn_cancel.clicked.connect(self._cancel)
         self.btn_cancel.setEnabled(False)
 
+        self.btn_sync_schema = QPushButton("Schema erstellen")
+        self.btn_sync_schema.setToolTip("Tabelle + Indizes in MSSQL aus SAP-Metadaten erstellen")
+        self.btn_sync_schema.clicked.connect(self._sync_schema)
+
+        self.btn_sync_schema_all = QPushButton("Alle Schemata erstellen")
+        self.btn_sync_schema_all.setToolTip("Alle Tabellen + Indizes in MSSQL erstellen")
+        self.btn_sync_schema_all.clicked.connect(self._sync_schema_all)
+
         action_layout.addWidget(self.btn_sync_all)
         action_layout.addWidget(self.btn_sync_selected)
         action_layout.addWidget(self.btn_init_cdc)
         action_layout.addWidget(self.btn_remove_cdc)
+        action_layout.addWidget(self.btn_sync_schema)
+        action_layout.addWidget(self.btn_sync_schema_all)
         action_layout.addStretch()
         action_layout.addWidget(self.btn_cancel)
         action_group.setLayout(action_layout)
@@ -797,6 +828,28 @@ class RunTab(QWidget):
         if reply == QMessageBox.Yes:
             self._start_worker([t], "remove_cdc")
 
+    def _sync_schema(self):
+        t = self.tables_tab.get_selected_table()
+        if not t:
+            QMessageBox.warning(self, "Keine Auswahl", "Bitte eine Tabelle auswählen.")
+            return
+        reply = QMessageBox.question(self, "Bestätigen",
+            f"Tabelle dbo.{t.get('target_table') or t['name']} in MSSQL erstellen?\n"
+            f"(Bestehende Tabelle wird gelöscht und neu erstellt mit Indizes aus SAP)")
+        if reply == QMessageBox.Yes:
+            self._start_worker([t], "sync_schema")
+
+    def _sync_schema_all(self):
+        tables = self.tables_tab.get_active_tables()
+        if not tables:
+            QMessageBox.warning(self, "Keine Tabellen", "Keine aktiven Tabellen.")
+            return
+        reply = QMessageBox.question(self, "Bestätigen",
+            f"{len(tables)} Tabellen in MSSQL erstellen?\n"
+            f"(Bestehende Tabellen werden gelöscht und neu erstellt mit Indizes)")
+        if reply == QMessageBox.Yes:
+            self._start_worker(tables, "sync_schema")
+
     def _cancel(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
@@ -807,6 +860,8 @@ class RunTab(QWidget):
         self.btn_sync_selected.setEnabled(enabled)
         self.btn_init_cdc.setEnabled(enabled)
         self.btn_remove_cdc.setEnabled(enabled)
+        self.btn_sync_schema.setEnabled(enabled)
+        self.btn_sync_schema_all.setEnabled(enabled)
         self.btn_cancel.setEnabled(not enabled)
 
     def _on_finished(self, success: int, fail: int):
