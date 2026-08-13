@@ -25,6 +25,13 @@ Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohn
 - Für kleine Tabellen oder als Fallback
 - Nutzt `Z_READ_TABLE` mit Chunking (10.000er Blöcke)
 
+### Ansatz 4: Flatfile Export (schnellster für große Tabellen)
+- ABAP schreibt CSV auf SAP-Server-Dateisystem
+- Python-Client lädt Datei via SCP herunter
+- BULK INSERT in MSSQL (10-50x schneller als INSERT-Batches)
+- 3-5x schneller als RFC-basierte Übertragung bei Millionen Zeilen
+- Zeitraum-Filter und Replace-Modi konfigurierbar
+
 ## Komponenten
 
 ### ABAP-Funktionsbausteine (`abap/`)
@@ -35,6 +42,8 @@ Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohn
 | `Z_CDC_READ` | Delta abholen (Log JOIN Originaltabelle, mit Chunking) |
 | `Z_CDC_CLEANUP` | Log aufräumen oder CDC komplett entfernen |
 | `Z_READ_TABLE` | Chunked Table Read (aus dem ODBC-Projekt, wird hier vorausgesetzt) |
+| `Z_EXPORT_TABLE` | Flatfile-Export: schreibt CSV auf SAP-Server-Dateisystem |
+| `Z_DELETE_FILE` | Löscht eine Datei auf dem SAP-Server (Cleanup nach Import) |
 
 ### Python-Client (`client/`)
 

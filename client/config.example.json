@@ -10,6 +10,12 @@
   "sql_server": {
     "connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=SAP_REPL;Trusted_Connection=yes;"
   },
+  "ssh": {
+    "host": "sap-prod.firma.de",
+    "user": "sapadm",
+    "key_file": "C:\\keys\\sap_id_rsa",
+    "port": 22
+  },
   "tables": [
     {
       "name": "MARA",
@@ -32,22 +38,31 @@
     },
     {
       "name": "VBAP",
-      "mode": "timeframe",
+      "mode": "flatfile",
       "delta_field": "AEDAT",
       "window": "day",
-      "chunk_size": 10000
+      "target_table": "VBAP",
+      "replace_mode": "replace_window",
+      "file_path": "/usr/sap/tmp/",
+      "fields": "*"
     },
     {
       "name": "ACDOCA",
-      "mode": "timeframe",
+      "mode": "flatfile",
       "delta_field": "AEDAT",
       "window": "day",
-      "chunk_size": 10000
+      "target_table": "ACDOCA",
+      "replace_mode": "replace_window",
+      "file_path": "/usr/sap/tmp/",
+      "fields": "*"
     },
     {
       "name": "T001W",
-      "mode": "full",
-      "chunk_size": 10000
+      "mode": "flatfile",
+      "target_table": "T001W",
+      "replace_mode": "replace_all",
+      "file_path": "/usr/sap/tmp/",
+      "fields": "*"
     }
   ]
 }

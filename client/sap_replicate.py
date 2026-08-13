@@ -520,6 +520,257 @@ class FullLoadReplicator:
 
 
 # ============================================================================
+# Flatfile Export Mode (fastest for large tables)
+# ============================================================================
+
+class FlatfileReplicator:
+    """Flatfile-based replication: Z_EXPORT_TABLE → SCP → BULK INSERT."""
+
+    def __init__(self, sap: SapConnection, sql: SqlServerConnection,
+                 ssh_config: dict = None):
+        self.sap = sap
+        self.sql = sql
+        self.ssh_config = ssh_config  # For SCP file transfer from SAP server
+
+    def _get_window_dates(self, window: str) -> Tuple[str, str]:
+        """Calculate from/to dates for the given window."""
+        today = date.today()
+        if window == 'day':
+            d = today.strftime('%Y%m%d')
+            return d, d
+        elif window == 'week':
+            from datetime import timedelta
+            start = today - timedelta(days=today.weekday())
+            return start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+        elif window == 'month':
+            return today.strftime('%Y%m01'), today.strftime('%Y%m%d')
+        elif window == 'year':
+            return today.strftime('%Y0101'), today.strftime('%Y%m%d')
+        else:
+            return '', ''
+
+    def _download_file(self, remote_path: str, local_path: str) -> bool:
+        """Download file from SAP server via SCP/SFTP."""
+        if not self.ssh_config:
+            log.error("  No SSH/SCP config — cannot download file from SAP server")
+            return False
+
+        import subprocess
+        host = self.ssh_config['host']
+        user = self.ssh_config.get('user', '')
+        key = self.ssh_config.get('key_file', '')
+        port = self.ssh_config.get('port', 22)
+
+        cmd = ['scp', '-P', str(port)]
+        if key:
+            cmd.extend(['-i', key])
+        cmd.append(f"{user}@{host}:{remote_path}" if user else f"{host}:{remote_path}")
+        cmd.append(local_path)
+
+        try:
+            log.info(f"  Downloading {remote_path} → {local_path}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            if result.returncode != 0:
+                log.error(f"  SCP failed: {result.stderr}")
+                return False
+            log.info(f"  Download complete")
+            return True
+        except Exception as e:
+            log.error(f"  SCP error: {e}")
+            return False
+
+    def _bulk_insert_csv(self, csv_path: str, target_table: str,
+                         replace_mode: str = 'append',
+                         date_field: str = None, date_from: str = None,
+                         date_to: str = None) -> int:
+        """Bulk insert CSV into SQL Server using BULK INSERT."""
+        import os
+        import csv
+
+        # Read CSV header to get column names
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f, delimiter='|')
+            header = next(reader)
+
+        col_names = [h.strip() for h in header]
+        col_list = ','.join(f"[{c}]" for c in col_names)
+
+        # Replace mode: delete target rows before insert
+        if replace_mode == 'replace_all':
+            log.info(f"  TRUNCATE dbo.{target_table}")
+            self.sql.execute(f"TRUNCATE TABLE dbo.{target_table}")
+            self.sql.commit()
+        elif replace_mode == 'replace_window' and date_field and date_from:
+            where = f"WHERE [{date_field}] >= '{date_from}'"
+            if date_to:
+                where += f" AND [{date_field}] <= '{date_to}'"
+            log.info(f"  DELETE FROM dbo.{target_table} {where}")
+            self.sql.execute(f"DELETE FROM dbo.{target_table} {where}")
+            self.sql.commit()
+
+        # Use BULK INSERT via pyodbc (fastest method)
+        # Need to share the file via a network path or local path
+        # For local execution: use BULK INSERT directly
+        csv_abs = os.path.abspath(csv_path).replace('\\', '\\\\')
+
+        bulk_sql = f"""
+            BULK INSERT dbo.{target_table}
+            FROM '{csv_abs}'
+            WITH (
+                FORMAT = 'CSV',
+                FIELDTERMINATOR = '|',
+                ROWTERMINATOR = '\\n',
+                FIRSTROW = 2,
+                TABLOCK,
+                ROWS_PER_BATCH = 50000
+            )
+        """
+
+        try:
+            log.info(f"  BULK INSERT into dbo.{target_table}")
+            cursor = self.sql.execute(bulk_sql)
+            self.sql.commit()
+
+            # Get row count
+            cursor = self.sql.execute(f"SELECT @@ROWCOUNT")
+            row_count = cursor.fetchone()[0]
+            log.info(f"  BULK INSERT complete: {row_count} rows")
+            return row_count
+        except Exception as e:
+            log.error(f"  BULK INSERT failed: {e}")
+            # Fallback: batch insert via pyodbc
+            return self._batch_insert_csv(csv_path, target_table, col_names)
+
+    def _batch_insert_csv(self, csv_path: str, target_table: str,
+                          col_names: list) -> int:
+        """Fallback: batch insert via pyodbc executemany."""
+        import csv
+
+        placeholders = ','.join(['?'] * len(col_names))
+        col_list = ','.join(f"[{c}]" for c in col_names)
+        insert_sql = f"INSERT INTO dbo.{target_table} ({col_list}) VALUES ({placeholders})"
+
+        batch = []
+        total = 0
+        batch_size = 5000
+
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f, delimiter='|')
+            next(reader)  # skip header
+
+            for row in reader:
+                # Pad row if needed
+                while len(row) < len(col_names):
+                    row.append('')
+                batch.append(row[:len(col_names)])
+
+                if len(batch) >= batch_size:
+                    self.sql.executemany(insert_sql, batch)
+                    self.sql.commit()
+                    total += len(batch)
+                    log.info(f"    Inserted {total} rows...")
+                    batch = []
+
+            if batch:
+                self.sql.executemany(insert_sql, batch)
+                self.sql.commit()
+                total += len(batch)
+
+        log.info(f"  Batch insert complete: {total} rows")
+        return total
+
+    def sync_table(self, table: str, target_table: str = None,
+                   date_field: str = None, date_from: str = None,
+                   date_to: str = None, window: str = None,
+                   fields: str = '*', max_rows: int = 0,
+                   file_path: str = '/usr/sap/tmp/',
+                   replace_mode: str = 'append',
+                   cleanup_after: bool = True):
+        """
+        Sync a table via flatfile export.
+        
+        replace_mode:
+          'append'        — just insert, don't delete
+          'replace_all'   — TRUNCATE target before insert
+          'replace_window' — DELETE date range in target before insert
+        """
+
+        target = target_table or table
+
+        # Calculate date range from window if not explicitly set
+        if window and not date_from:
+            date_from, date_to = self._get_window_dates(window)
+            log.info(f"FLATFILE sync: {table} → dbo.{target} (window={window}: {date_from} to {date_to})")
+        else:
+            log.info(f"FLATFILE sync: {table} → dbo.{target}")
+
+        # Step 1: Call Z_EXPORT_TABLE on SAP
+        params = {
+            'IV_TABLE': table,
+            'IV_FIELDS': fields,
+            'IV_MAX_ROWS': max_rows,
+            'IV_FILE_PATH': file_path,
+        }
+        if date_field:
+            params['IV_DATE_FIELD'] = date_field
+        if date_from:
+            params['IV_DATE_FROM'] = date_from
+        if date_to:
+            params['IV_DATE_TO'] = date_to
+
+        log.info(f"  Calling Z_EXPORT_TABLE...")
+        result = self.sap.call('Z_EXPORT_TABLE', **params)
+
+        if result.get('EV_ERROR'):
+            log.error(f"  Export error: {result['EV_ERROR']}")
+            return False
+
+        remote_file = result.get('EV_FILE_NAME', '')
+        row_count = result.get('EV_ROW_COUNT', 0)
+        file_size = result.get('EV_FILE_SIZE', 0)
+
+        log.info(f"  Export complete: {row_count} rows, {file_size} bytes → {remote_file}")
+
+        if row_count == 0:
+            log.info(f"  No data to transfer")
+            # Still cleanup the empty file
+            if cleanup_after and remote_file:
+                self.sap.call('Z_DELETE_FILE', IV_FILE_PATH=remote_file)
+            return True
+
+        # Step 2: Download file from SAP server
+        import tempfile
+        import os
+        local_file = os.path.join(tempfile.gettempdir(), os.path.basename(remote_file))
+
+        if not self._download_file(remote_file, local_file):
+            log.error(f"  Cannot download file from SAP server")
+            return False
+
+        # Step 3: Bulk insert into SQL Server
+        inserted = self._bulk_insert_csv(local_file, target,
+                                          replace_mode=replace_mode,
+                                          date_field=date_field,
+                                          date_from=date_from,
+                                          date_to=date_to)
+
+        # Step 4: Cleanup
+        if cleanup_after:
+            # Delete remote file on SAP server
+            log.info(f"  Cleaning up remote file: {remote_file}")
+            self.sap.call('Z_DELETE_FILE', IV_FILE_PATH=remote_file)
+
+            # Delete local file
+            try:
+                os.remove(local_file)
+            except OSError:
+                pass
+
+        log.info(f"FLATFILE sync complete: {table} → {target} — {inserted} rows")
+        return True
+
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -529,7 +780,8 @@ def load_config(path: str) -> dict:
 
 
 def run_table(table_cfg: dict, sap: SapConnection, sql: SqlServerConnection,
-              state: StateManager, mode_override: str = None, window_override: str = None):
+              state: StateManager, config: dict = None,
+              mode_override: str = None, window_override: str = None):
     """Run sync for a single table based on its config."""
 
     table = table_cfg['name']
@@ -538,6 +790,12 @@ def run_table(table_cfg: dict, sap: SapConnection, sql: SqlServerConnection,
     delta_field = table_cfg.get('delta_field', 'AEDAT')
     window = window_override or table_cfg.get('window', 'month')
     chunk_size = table_cfg.get('chunk_size', 10000)
+    target_table = table_cfg.get('target_table', table)
+    date_field = table_cfg.get('date_field')
+    replace_mode = table_cfg.get('replace_mode', 'append')
+    file_path = table_cfg.get('file_path', '/usr/sap/tmp/')
+    fields = table_cfg.get('fields', '*')
+    max_rows = table_cfg.get('max_rows', 0)
 
     try:
         if mode == 'cdc':
@@ -555,6 +813,20 @@ def run_table(table_cfg: dict, sap: SapConnection, sql: SqlServerConnection,
             replicator = FullLoadReplicator(sap, sql)
             return replicator.sync_table(table, chunk_size)
 
+        elif mode == 'flatfile':
+            ssh_config = config.get('ssh') if config else None
+            replicator = FlatfileReplicator(sap, sql, ssh_config)
+            return replicator.sync_table(
+                table=table,
+                target_table=target_table,
+                date_field=date_field if mode_override != 'flatfile' else delta_field,
+                window=window,
+                fields=fields,
+                max_rows=max_rows,
+                file_path=file_path,
+                replace_mode=replace_mode if not window else 'replace_window' if date_field else 'replace_all'
+            )
+
         else:
             log.error(f"  {table}: unknown mode '{mode}'")
             return False
@@ -568,7 +840,7 @@ def main():
     parser = argparse.ArgumentParser(description='SAP Data Replication Client')
     parser.add_argument('--config', required=True, help='Path to config.json')
     parser.add_argument('--table', help='Sync only this table (default: all in config)')
-    parser.add_argument('--mode', choices=['cdc', 'timeframe', 'full'],
+    parser.add_argument('--mode', choices=['cdc', 'timeframe', 'full', 'flatfile'],
                         help='Override mode for --table')
     parser.add_argument('--window', choices=['day', 'week', 'month', 'year'],
                         help='Override window for timeframe mode')
@@ -615,7 +887,7 @@ def main():
 
         for t in tables:
             log.info(f"--- Syncing {t['name']} ---")
-            ok = run_table(t, sap, sql, state, args.mode, args.window)
+            ok = run_table(t, sap, sql, state, config, args.mode, args.window)
             if ok:
                 success_count += 1
             else:

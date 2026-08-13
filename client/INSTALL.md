@@ -133,6 +133,7 @@ python C:\sap-repl\sap_replicate.py --config C:\sap-repl\config.json
 | `cdc` | Trigger-basiertes CDC mit automatischem Delta | Z_CDC_INIT ausgeführt, Full-Load gemacht |
 | `timeframe` | Zeitfenster-Delta über Änderungsdatum | Tabelle hat AEDAT/LAEDA Feld |
 | `full` | Komplette Tabelle laden (TRUNCATE + INSERT) | Keine |
+| `flatfile` | CSV-Export vom SAP-Server + BULK INSERT | SSH-Zugang zum SAP-Server |
 
 ### Window-Optionen (für timeframe-Modus)
 
