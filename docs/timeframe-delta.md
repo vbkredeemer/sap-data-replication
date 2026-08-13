@@ -64,18 +64,48 @@ SELECT * FROM ACDOCA WHERE AEDAT = '20260813';
 
 Das wären bei ACDOCA vielleicht 100.000-200.000 Sätze pro Tag — mit `Z_READ_TABLE` Chunking in 5-10 Minuten erledigt.
 
-## Vorteile
+## Zeitfenster-Logik: Aktueller + vorheriger Zeitraum
 
-| Aspekt | Bewertung |
-|---|---|
-| Kein Trigger nötig | ✅ Keine Datenbank-Trigger, keine Log-Tabelle |
-| Keine Modifikation an SAP-Tabellen | ✅ Keine DDIC-Änderung, kein SPDD/SPAU |
-| Upgrade-sicher | ✅ Nichts kann wegfliegen |
-| DELETEs werden erfasst | ✅ Gesamter Zeitraum wird ersetzt |
-| Nutzt vorhandene Infrastruktur | ✅ Z_READ_TABLE + ODBC-Treiber, keine neuen Bausteine |
-| Einfach zu automatisieren | ✅ SQL Server Agent Job mit DELETE + INSERT |
-| Keine Log-Tabelle auf SAP | ✅ Keine Speicherbelastung |
-| Keine Wartung | ✅ Kein Trigger-Monitoring nötig |
+**Wichtig:** Es wird immer der **aktuelle UND der vorherige Zeitraum** geladen und in der Zieltabelle ersetzt. Diese Überlappung verhindert Datenverlust beim Periodenwechsel.
+
+### Beispiel: Monat
+
+```
+Heute: 15. August 2026
+
+Geladen und ersetzt:
+  Juli 2026 (01.07.2026 - 31.07.2026)   ← vorheriger Zeitraum
+  August 2026 (01.08.2026 - 15.08.2026) ← aktueller Zeitraum
+
+DELETE FROM dbo.ACDOCA WHERE AEDAT >= '2026-07-01'
+SELECT * FROM ACDOCA WHERE AEDAT >= '20260701'
+INSERT INTO dbo.ACDOCA ...
+```
+
+Wenn am 1. September der Sync läuft:
+```
+Geladen und ersetzt:
+  August 2026 (01.08.2026 - 31.08.2026)  ← vorheriger Zeitraum
+  September 2026 (01.09.2026 - 01.09.2026) ← aktueller Zeitraum
+
+→ August wurde beim letzten Sync (August) geladen,
+  wird aber beim September-Sync erneut geladen (als vorheriger Zeitraum).
+→ Keine Lücke, keine verlorenen Daten beim Monatswechsel.
+```
+
+### Fenster-Definitionen
+
+| Fenster | Aktueller Zeitraum | Vorheriger Zeitraum | Woche gilt |
+|---|---|---|---|
+| `day` | Heute | Gestern | — |
+| `week` | Mo-So dieser Woche | Mo-So letzte Woche | Montag bis Sonntag |
+| `month` | 1. bis heute | Vorheriger Monat 1. bis letzter Tag | — |
+| `year` | 1. Jan bis heute | Vorheriges Jahr komplett | — |
+| `all` | — | — | Komplette Tabelle (TRUNCATE + INSERT) |
+
+### Löschen in der Zieltabelle
+
+Bei `replace_window` wird der gleiche Zeitraum (ab Start des vorherigen Zeitraums) in der Zieltabelle gelöscht bevor neu eingefügt wird. Das Format wird automatisch von `YYYYMMDD` (SAP) nach `YYYY-MM-DD` (MSSQL DATE) konvertiert.
 
 ## Nachteile und Risiken
 

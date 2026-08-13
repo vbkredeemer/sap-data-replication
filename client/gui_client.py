@@ -61,7 +61,7 @@ DEFAULT_CONFIG = {
 }
 
 TABLE_MODES = ["cdc", "timeframe", "full", "flatfile"]
-WINDOW_OPTIONS = ["day", "week", "month", "year"]
+WINDOW_OPTIONS = ["day", "week", "month", "year", "all"]
 REPLACE_MODES = ["append", "replace_all", "replace_window"]
 
 

@@ -356,38 +356,91 @@ class TimeframeReplicator:
         self.sap = sap
         self.sql = sql
 
-    def _get_window_start(self, window: str) -> str:
-        """Calculate the start date for the given window."""
+    def _get_window_range(self, window: str) -> Tuple[str, str]:
+        """
+        Calculate the date range covering the current AND previous period.
+        
+        Returns (from_date, to_date) as YYYYMMDD strings.
+        For 'all': returns ('', '') meaning no date filter — full table load.
+        to_date is always today (inclusive).
+        from_date is the start of the PREVIOUS period.
+        """
         today = date.today()
+        
+        if window == 'all':
+            # Full table — no date filter
+            return '', ''
+        
         if window == 'day':
-            return today.strftime('%Y%m%d')
-        elif window == 'week':
+            # Current: today, Previous: yesterday
             from datetime import timedelta
-            start = today - timedelta(days=today.weekday())
-            return start.strftime('%Y%m%d')
+            prev = today - timedelta(days=1)
+            return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+            
+        elif window == 'week':
+            # Week = Monday to Sunday
+            # Current week start (Monday)
+            from datetime import timedelta
+            current_week_start = today - timedelta(days=today.weekday())
+            # Previous week start
+            prev_week_start = current_week_start - timedelta(days=7)
+            return prev_week_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+            
         elif window == 'month':
-            return today.strftime('%Y%m01')
+            # Current month start
+            current_month_start = today.replace(day=1)
+            # Previous month start
+            if today.month == 1:
+                prev_month_start = today.replace(year=today.year - 1, month=12, day=1)
+            else:
+                prev_month_start = today.replace(month=today.month - 1, day=1)
+            return prev_month_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+            
         elif window == 'year':
-            return today.strftime('%Y0101')
+            # Current year start
+            current_year_start = today.replace(month=1, day=1)
+            # Previous year start
+            prev_year_start = current_year_start.replace(year=today.year - 1)
+            return prev_year_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+            
         else:
-            return today.strftime('%Y%m%d')
+            # Default: today + yesterday
+            from datetime import timedelta
+            prev = today - timedelta(days=1)
+            return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
 
     def sync_table(self, table: str, delta_field: str, window: str = 'month',
                    chunk_size: int = 10000):
-        """Sync a table using timeframe delta (trigger-free)."""
-        window_start = self._get_window_start(window)
-        log.info(f"TIMEFRAME sync: {table} where {delta_field} >= {window_start} (window={window})")
+        """Sync a table using timeframe delta (trigger-free).
+        
+        Always loads current + previous period to prevent data loss at boundaries.
+        Deletes the same range in the target table before inserting.
+        """
+        date_from, date_to = self._get_window_range(window)
+        
+        if window == 'all' or not date_from:
+            # Full table replace — TRUNCATE + load all
+            log.info(f"TIMEFRAME sync: {table} (window=all → full table replace)")
+            self.sql.execute(f"TRUNCATE TABLE dbo.{table}")
+            self.sql.commit()
+            where_clause = ""  # no WHERE filter
+        else:
+            log.info(f"TIMEFRAME sync: {table} where {delta_field} >= '{date_from}' "
+                     f"(window={window}, current+previous period)")
 
-        # Step 1: Delete current window from target
-        log.info(f"  Deleting rows from dbo.{table} where {delta_field} >= '{window_start}'")
-        self.sql.execute(
-            f"DELETE FROM dbo.{table} WHERE {delta_field} >= ?",
-            (window_start,)
-        )
-        self.sql.commit()
+            # Step 1: Delete current+previous period from target
+            # Convert YYYYMMDD to YYYY-MM-DD for MSSQL DATE columns
+            mssql_date_from = f"{date_from[:4]}-{date_from[4:6]}-{date_from[6:8]}"
+            log.info(f"  Deleting rows from dbo.{table} where {delta_field} >= '{mssql_date_from}'")
+            self.sql.execute(
+                f"DELETE FROM dbo.{table} WHERE [{delta_field}] >= ?",
+                (mssql_date_from,)
+            )
+            self.sql.commit()
 
-        # Step 2: Read from SAP via Z_READ_TABLE with WHERE clause
-        where_clause = f"{delta_field} >= '{window_start}'"
+            # Step 2: Read from SAP via Z_READ_TABLE with WHERE clause
+            # SAP expects YYYYMMDD format (not YYYY-MM-DD)
+            where_clause = f"{delta_field} >= '{date_from}'"
         total_rows = 0
         skip = 0
 
@@ -541,22 +594,39 @@ class FlatfileReplicator:
         self.transfer_method = transfer_method  # 'scp', 'smb', 'local'
         self.smb_share = smb_share  # e.g. r'\\sap-server\sap\tmp'
 
-    def _get_window_dates(self, window: str) -> Tuple[str, str]:
-        """Calculate from/to dates for the given window."""
+    def _get_window_range(self, window: str) -> Tuple[str, str]:
+        """
+        Calculate date range covering current AND previous period.
+        Overlap prevents data loss at period boundaries.
+        
+        Returns (from_date, to_date) as YYYYMMDD strings.
+        from_date = start of PREVIOUS period.
+        to_date = today (inclusive).
+        """
         today = date.today()
+        
         if window == 'day':
-            d = today.strftime('%Y%m%d')
-            return d, d
+            from datetime import timedelta
+            prev = today - timedelta(days=1)
+            return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
         elif window == 'week':
             from datetime import timedelta
-            start = today - timedelta(days=today.weekday())
-            return start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+            current_week_start = today - timedelta(days=today.weekday())
+            prev_week_start = current_week_start - timedelta(days=7)
+            return prev_week_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
         elif window == 'month':
-            return today.strftime('%Y%m01'), today.strftime('%Y%m%d')
+            if today.month == 1:
+                prev_month_start = today.replace(year=today.year - 1, month=12, day=1)
+            else:
+                prev_month_start = today.replace(month=today.month - 1, day=1)
+            return prev_month_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
         elif window == 'year':
-            return today.strftime('%Y0101'), today.strftime('%Y%m%d')
+            prev_year_start = today.replace(year=today.year - 1, month=1, day=1)
+            return prev_year_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
         else:
-            return '', ''
+            from datetime import timedelta
+            prev = today - timedelta(days=1)
+            return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
 
     def _download_file(self, remote_path: str, local_path: str) -> bool:
         """Download file from SAP server — supports SCP, SMB, and local methods."""
@@ -679,9 +749,12 @@ class FlatfileReplicator:
             self.sql.execute(f"TRUNCATE TABLE dbo.{target_table}")
             self.sql.commit()
         elif replace_mode == 'replace_window' and date_field and date_from:
-            where = f"WHERE [{date_field}] >= '{date_from}'"
+            # date_from is YYYYMMDD from _get_window_range — convert to YYYY-MM-DD for MSSQL
+            mssql_date_from = f"{date_from[:4]}-{date_from[4:6]}-{date_from[6:8]}"
+            where = f"WHERE [{date_field}] >= '{mssql_date_from}'"
             if date_to:
-                where += f" AND [{date_field}] <= '{date_to}'"
+                mssql_date_to = f"{date_to[:4]}-{date_to[4:6]}-{date_to[6:8]}"
+                where += f" AND [{date_field}] <= '{mssql_date_to}'"
             log.info(f"  DELETE FROM dbo.{target_table} {where}")
             self.sql.execute(f"DELETE FROM dbo.{target_table} {where}")
             self.sql.commit()
@@ -776,9 +849,20 @@ class FlatfileReplicator:
         target = target_table or table
 
         # Calculate date range from window if not explicitly set
+        # Always includes current + previous period for overlap safety
         if window and not date_from:
-            date_from, date_to = self._get_window_dates(window)
-            log.info(f"FLATFILE sync: {table} → dbo.{target} (window={window}: {date_from} to {date_to})")
+            date_from, date_to = self._get_window_range(window)
+            if window == 'all' or not date_from:
+                # Full table — no date filter, replace all
+                log.info(f"FLATFILE sync: {table} → dbo.{target} (window=all → full table replace)")
+                replace_mode = 'replace_all'
+                date_field = None  # no date filter for export
+            else:
+                log.info(f"FLATFILE sync: {table} → dbo.{target} "
+                         f"(window={window}, current+previous: {date_from} to {date_to})")
+                # When using window, always use replace_window to delete the same range
+                if date_field:
+                    replace_mode = 'replace_window'
         else:
             log.info(f"FLATFILE sync: {table} → dbo.{target}")
 
@@ -925,7 +1009,7 @@ def main():
     parser.add_argument('--table', help='Sync only this table (default: all in config)')
     parser.add_argument('--mode', choices=['cdc', 'timeframe', 'full', 'flatfile'],
                         help='Override mode for --table')
-    parser.add_argument('--window', choices=['day', 'week', 'month', 'year'],
+    parser.add_argument('--window', choices=['day', 'week', 'month', 'year', 'all'],
                         help='Override window for timeframe mode')
     parser.add_argument('--init-only', action='store_true',
                         help='Only run Z_CDC_INIT (check triggers, no sync)')
