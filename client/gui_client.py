@@ -1364,6 +1364,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.run_tab, "Ausführen")
         self.tabs.addTab(self.schedule_tab, "Zeitplan")
 
+        # Context-sensitive help on tab change
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
         layout.addWidget(self.tabs)
 
         # Status Bar
@@ -1397,6 +1400,30 @@ class MainWindow(QMainWindow):
         # Help Menu
         help_menu = menubar.addMenu("Hilfe")
 
+        action_help_settings = QAction("Hilfe: Verbindungen", self)
+        action_help_settings.triggered.connect(lambda: self._show_help("settings"))
+        help_menu.addAction(action_help_settings)
+
+        action_help_tables = QAction("Hilfe: Tabellen", self)
+        action_help_tables.triggered.connect(lambda: self._show_help("tables"))
+        help_menu.addAction(action_help_tables)
+
+        action_help_run = QAction("Hilfe: Ausführen", self)
+        action_help_run.triggered.connect(lambda: self._show_help("run"))
+        help_menu.addAction(action_help_run)
+
+        action_help_schedule = QAction("Hilfe: Zeitplan", self)
+        action_help_schedule.triggered.connect(lambda: self._show_help("schedule"))
+        help_menu.addAction(action_help_schedule)
+
+        help_menu.addSeparator()
+
+        action_help_quickstart = QAction("Schnellstart-Anleitung", self)
+        action_help_quickstart.triggered.connect(lambda: self._show_help("quickstart"))
+        help_menu.addAction(action_help_quickstart)
+
+        help_menu.addSeparator()
+
         action_about = QAction("Über", self)
         action_about.triggered.connect(self._show_about)
         help_menu.addAction(action_about)
@@ -1417,6 +1444,23 @@ class MainWindow(QMainWindow):
         self.tables_tab._load_tables()
         self.status_bar.showMessage("Konfiguration neu geladen", 3000)
 
+    def _on_tab_changed(self, index: int):
+        """Update status bar with hint when tab changes."""
+        hints = {
+            0: "Verbindungen — SAP, SQL Server, SSH und Flatfile-Übertragung konfigurieren",
+            1: "Tabellen — Tabellen und Replikationsmodi konfigurieren",
+            2: "Ausführen — Sync starten, Schema erstellen, CDC verwalten",
+            3: "Zeitplan — Automatische Jobs und Windows-Aufgaben einrichten",
+        }
+        hint = hints.get(index, "Bereit")
+        self.status_bar.showMessage(hint)
+        # Also show in the schedule tab's status if available
+        if index == 3 and hasattr(self, 'schedule_tab'):
+            if not self.schedule_tab.scheduler_running:
+                self.schedule_tab.sched_status.setText(
+                    "Tipp: Hilfe → Hilfe: Zeitplan für Anleitung"
+                )
+
     def _show_about(self):
         QMessageBox.about(self, "Über SAP Data Replication",
             "<h3>SAP Data Replication Client</h3>"
@@ -1424,6 +1468,380 @@ class MainWindow(QMainWindow):
             "<p><b>Modi:</b> CDC (Trigger), Timeframe, Full-Load, Flatfile</p>"
             "<p><b>Lizenz:</b> GPL-3.0</p>"
             "<p><b>GitHub:</b> https://github.com/vbkredeemer/sap-data-replication</p>")
+
+    def _show_help(self, topic: str):
+        """Show context-sensitive help dialog for the given topic."""
+        helps = {
+            "quickstart": (
+                "Schnellstart-Anleitung",
+                self._help_quickstart()
+            ),
+            "settings": (
+                "Hilfe: Verbindungen",
+                self._help_settings()
+            ),
+            "tables": (
+                "Hilfe: Tabellen",
+                self._help_tables()
+            ),
+            "run": (
+                "Hilfe: Ausführen",
+                self._help_run()
+            ),
+            "schedule": (
+                "Hilfe: Zeitplan",
+                self._help_schedule()
+            ),
+        }
+
+        if topic in helps:
+            title, content = helps[topic]
+            self._show_help_dialog(title, content)
+
+    def _show_help_dialog(self, title: str, content: str):
+        """Show a scrollable help dialog with formatted HTML content."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QScrollArea
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumSize(QSize(700, 500))
+        dialog.resize(800, 600)
+
+        layout = QVBoxLayout(dialog)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+
+        label = QLabel(content)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.RichText)
+        label.setStyleSheet("font-size: 13px; padding: 10px;")
+        scroll.setWidget(label)
+
+        layout.addWidget(scroll)
+
+        btn_close = QPushButton("Schließen")
+        btn_close.clicked.connect(dialog.accept)
+        layout.addWidget(btn_close)
+
+        dialog.exec()
+
+    def _help_quickstart(self):
+        return """<h2>Schnellstart-Anleitung</h2>
+
+<h3>Schritt 1: SAP-Funktionsbausteine installieren</h3>
+<p>Installieren Sie die folgenden Bausteine in SAP (SE37, Funktionsgruppe Z_SQL):</p>
+<ul>
+  <li><b>Z_READ_TABLE</b> — Chunked Table Read</li>
+  <li><b>Z_EXECUTE_SQL</b> — SQL-Abfragen über ADBC</li>
+  <li><b>Z_CDC_INIT</b> — CDC initialisieren (Trigger + Log-Tabelle)</li>
+  <li><b>Z_CDC_READ</b> — CDC Delta abholen</li>
+  <li><b>Z_CDC_CLEANUP</b> — CDC Log aufräumen / entfernen</li>
+  <li><b>Z_EXPORT_TABLE</b> — Flatfile-Export (CSV)</li>
+  <li><b>Z_DELETE_FILE</b> — Datei auf SAP-Server löschen</li>
+</ul>
+<p>Alle Bausteine verwenden vorhandene DDIC-Typen (ZSQL_FIELD, ZSQL_ROW) — keine neuen Domänen/Elemente nötig.</p>
+
+<h3>Schritt 2: Verbindungen konfigurieren</h3>
+<ol>
+  <li>Tab <b>Verbindungen</b> öffnen</li>
+  <li>SAP-Daten eingeben (Host, Systemnummer, Mandant, User, Passwort)</li>
+  <li>SQL Server Connection String eingeben</li>
+  <li><b>Speichern</b> klicken</li>
+  <li><b>SAP testen</b> und <b>SQL Server testen</b> klicken</li>
+</ol>
+
+<h3>Schritt 3: Tabellen konfigurieren</h3>
+<ol>
+  <li>Tab <b>Tabellen</b> öffnen</li>
+  <li><b>+ Tabelle hinzufügen</b> klicken</li>
+  <li>Tabellennamen (z.B. MARA), Modus (z.B. timeframe), Delta-Feld (z.B. AEDAT), Window (z.B. day) eintragen</li>
+  <li><b>Speichern</b> klicken</li>
+</ol>
+
+<h3>Schritt 4: Schema erstellen</h3>
+<ol>
+  <li>Tab <b>Ausführen</b> öffnen</li>
+  <li><b>Alle Schemata erstellen</b> klicken — erstellt Tabellen + Indizes in MSSQL</li>
+</ol>
+
+<h3>Schritt 5: Erst-Load</h3>
+<ol>
+  <li>Tab <b>Ausführen</b> → <b>Alle aktiven Tabellen syncen</b> klicken</li>
+  <li>Warten bis Sync abgeschlossen ist</li>
+</ol>
+
+<h3>Schritt 6: Zeitplan einrichten</h3>
+<ol>
+  <li>Tab <b>Zeitplan</b> öffnen</li>
+  <li>Jobs hinzufügen (Tabelle + Intervall)</li>
+  <li>Entweder <b>Scheduler starten</b> (GUI muss offen bleiben) oder <b>Windows-Aufgabe erstellen</b> (läuft automatisch)</li>
+</ol>
+
+<h3>Empfohlene Modi pro Tabellentyp</h3>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Tabellentyp</th><th>Modus</th><th>Window</th><th>Grund</th></tr>
+<tr><td>Stammdaten (MARA, KNA1)</td><td>timeframe</td><td>month</td><td>Wenige Änderungen, AEDAT zuverlässig</td></tr>
+<tr><td>Bewegungsdaten (VBAK, VBAP)</td><td>timeframe</td><td>day</td><td>Tägliche Änderungen, AEDAT vorhanden</td></tr>
+<tr><td>Große Tabellen (ACDOCA, MSEG)</td><td>flatfile</td><td>day</td><td>3-5x schneller als RFC</td></tr>
+<tr><td>Kleine Tabellen (T001W)</td><td>full</td><td>—</td><td>Trivial, einfach komplett laden</td></tr>
+<tr><td>Mit Delta-Queue nötig</td><td>cdc</td><td>—</td><td>Trigger-basiert, erfasst DELETEs</td></tr>
+</table>
+"""
+
+    def _help_settings(self):
+        return """<h2>Verbindungen konfigurieren</h2>
+
+<p>In diesem Tab werden alle Verbindungen eingerichtet, die der Client für die Datenreplikation benötigt.</p>
+
+<h3>SAP-Verbindung (RFC)</h3>
+<p>Verbindung zum SAP-Applikationsserver über das SAP NWRFC SDK.</p>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Feld</th><th>Beschreibung</th><th>Beispiel</th></tr>
+<tr><td><b>Application Server</b></td><td>Hostname oder IP des SAP-Applikationsservers</td><td>sap-prod.firma.de</td></tr>
+<tr><td><b>Systemnummer</b></td><td>SAP-Systemnummer (zweistellig)</td><td>10</td></tr>
+<tr><td><b>Mandant</b></td><td>SAP-Mandant (dreistellig)</td><td>100</td></tr>
+<tr><td><b>User</b></td><td>SAP-User für RFC-Aufrufe</td><td>RFC_USER</td></tr>
+<tr><td><b>Passwort</b></td><td>Passwort des SAP-Users</td><td>********</td></tr>
+<tr><td><b>Sprache</b></td><td>Anmeldesprache (EN empfohlen)</td><td>EN</td></tr>
+</table>
+<p><b>SAP testen:</b> Stellt eine Testverbindung her und prüft ob die RFC-Parameter korrekt sind.</p>
+
+<h3>SQL Server Verbindung</h3>
+<p>Verbindung zur Zieldatenbank (Microsoft SQL Server) über ODBC.</p>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Feld</th><th>Beschreibung</th></tr>
+<tr><td><b>Connection String</b></td><td>ODBC-Verbindungsstring für den SQL Server</td></tr>
+</table>
+<p>Format:<br>
+<code>Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=SAP_REPL;Trusted_Connection=yes;</code></p>
+<p>Alternativ mit SQL-Authentifizierung:<br>
+<code>Driver={ODBC Driver 17 for SQL Server};Server=myserver;Database=SAP_REPL;UID=myuser;PWD=mypassword;</code></p>
+<p><b>SQL Server testen:</b> Stellt eine Testverbindung her.</p>
+
+<h3>SSH-Verbindung (für Flatfile-Modus)</h3>
+<p>Wird nur benötigt, wenn der Flatfile-Modus mit Übertragungsmethode <b>SCP</b> verwendet wird. Für SMB oder Local wird keine SSH-Verbindung benötigt.</p>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Feld</th><th>Beschreibung</th></tr>
+<tr><td><b>Host</b></td><td>SSH-Host des SAP-Servers (meist gleich wie Application Server)</td></tr>
+<tr><td><b>User</b></td><td>SSH-User (z.B. sapadm)</td></tr>
+<tr><td><b>Key File</b></td><td>Pfad zum privaten SSH-Schlüssel (z.B. C:\\keys\\sap_id_rsa)</td></tr>
+<tr><td><b>Port</b></td><td>SSH-Port (Standard: 22)</td></tr>
+</table>
+
+<h3>Flatfile-Übertragung</h3>
+<p>Definiert wie die CSV-Dateien vom SAP-Server auf den MSSQL-Server übertragen werden.</p>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Methode</th><th>Beschreibung</th><th>Voraussetzung</th></tr>
+<tr><td><b>scp</b></td><td>SSH Secure Copy — Datei-Transfer über SSH</td><td>SSH-Verbindung konfiguriert, SSH-Key</td></tr>
+<tr><td><b>smb</b></td><td>Windows-Netzlaufwerk (UNC-Pfad)</td><td>SAP-Server hat Samba-Share freigegeben</td></tr>
+<tr><td><b>local</b></td><td>Datei ist lokal verfügbar (NFS-Mount)</td><td>SAP-Verzeichnis ist auf MSSQL-Server gemountet</td></tr>
+</table>
+<p><b>SMB-Share (UNC-Pfad):</b> z.B. <code>\\\\sap-server\\sap\\tmp</code> — der SAP-Server schreibt nach /usr/sap/tmp/, der MSSQL-Server greift über das Windows-Share zu.</p>
+"""
+
+    def _help_tables(self):
+        return """<h2>Tabellen konfigurieren</h2>
+
+<p>In diesem Tab definieren Sie welche SAP-Tabellen repliziert werden sollen und mit welchem Modus.</p>
+
+<h3>Schaltflächen</h3>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Schaltfläche</th><th>Funktion</th></tr>
+<tr><td><b>+ Tabelle hinzufügen</b></td><td>Fügt eine neue Zeile hinzu mit Default-Werten</td></tr>
+<tr><td><b>- Entfernen</b></td><td>Entfernt die ausgewählte Zeile</td></tr>
+<tr><td><b>Speichern</b></td><td>Speichert die Tabellen-Konfiguration in config.json</td></tr>
+<tr><td><b>Rechtsklick</b></td><td>Kontextmenü: Zeile duplizieren oder entfernen</td></tr>
+</table>
+
+<h3>Felder pro Tabelle</h3>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Feld</th><th>Beschreibung</th><th>Pflicht?</th><th>Beispiel</th></tr>
+<tr><td><b>Tabelle</b></td><td>Name der SAP-Tabelle</td><td>Ja</td><td>MARA</td></tr>
+<tr><td><b>Modus</b></td><td>Replikationsmodus (Dropdown)</td><td>Ja</td><td>timeframe</td></tr>
+<tr><td><b>Key Fields</b></td><td>Primärschlüsselfelder (kommagetrennt). Nur für CDC-Modus nötig.</td><td>Nur CDC</td><td>MATNR</td></tr>
+<tr><td><b>Delta Field</b></td><td>Feldname des Änderungsdatums. Für timeframe und flatfile.</td><td>Zeitraum-Modi</td><td>AEDAT</td></tr>
+<tr><td><b>Window</b></td><td>Zeitfenster (Dropdown): day, week, month, year, all</td><td>Zeitraum-Modi</td><td>day</td></tr>
+<tr><td><b>Target Table</b></td><td>Name der Zieltabelle in MSSQL. Leer = gleicher Name wie SAP.</td><td>Nein</td><td>MARA (oder leer)</td></tr>
+<tr><td><b>Replace Mode</b></td><td>Wie Daten in Zieltabelle ersetzt werden (Dropdown)</td><td>Nein</td><td>replace_window</td></tr>
+<tr><td><b>Chunk Size</b></td><td>Anzahl Zeilen pro RFC-Aufruf (nur RFC-basierte Modi)</td><td>Nein</td><td>10000</td></tr>
+<tr><td><b>Fields</b></td><td>Feldauswahl: * für alle, oder kommagetrennte Liste</td><td>Nein</td><td>*</td></tr>
+<tr><td><b>Aktiv</b></td><td>Checkbox — nur aktive Tabellen werden bei "Alle syncen" berücksichtigt</td><td>Nein</td><td>☑</td></tr>
+</table>
+
+<h3>Modi im Detail</h3>
+
+<h4>CDC (Trigger-basiert)</h4>
+<p>Automatisches Delta-Handling über Datenbank-Trigger. Erfasst INSERT, UPDATE und DELETE.</p>
+<ul>
+  <li><b>Key Fields:</b> Pflicht — Primärschlüsselfelder, z.B. "MATNR" oder "MANDT,MATNR"</li>
+  <li><b>Voraussetzung:</b> Z_CDC_INIT muss einmalig ausgeführt werden (Tab "Ausführen" → "CDC initialisieren")</li>
+  <li><b>Ablauf:</b> Trigger loggt Änderungen → Z_CDC_READ liefert Delta → Z_CDC_CLEANUP räumt auf</li>
+  <li><b>Vorteil:</b> Echtes CDC inkl. DELETE-Erkennung, automatisches Delta</li>
+  <li><b>Nachteil:</b> Trigger kann bei SAP-Upgrades verloren gehen (wird durch nächtlichen Check erkannt)</li>
+</ul>
+
+<h4>Timeframe (Zeitfenster-Delta)</h4>
+<p>Trigger-frei — lädt geänderte Daten über das Änderungsdatum (z.B. AEDAT, LAEDA).</p>
+<ul>
+  <li><b>Delta Field:</b> Feldname des Änderungsdatums in der SAP-Tabelle</li>
+  <li><b>Window:</b> Zeitfenster — lädt immer aktuellen + vorherigen Zeitraum</li>
+  <li><b>Ablauf:</b> DELETE Zeitraum in MSSQL → Z_READ_TABLE mit WHERE → INSERT</li>
+  <li><b>Vorteil:</b> Keine Trigger, upgrade-sicher, einfach</li>
+  <li><b>Nachteil:</b> Keine DELETE-Erkennung für ältere Zeiträume</li>
+</ul>
+
+<h4>Full (Komplettladung)</h4>
+<p>Lädt die komplette Tabelle — TRUNCATE + INSERT.</p>
+<ul>
+  <li><b>Für kleine Tabellen</b> (&lt; 50.000 Zeilen) empfohlen</li>
+  <li>Nutzt Z_READ_TABLE mit Chunking</li>
+</ul>
+
+<h4>Flatfile (CSV-Export)</h4>
+<p>Schnellster Modus für große Tabellen — SAP schreibt CSV, Python lädt via BULK INSERT.</p>
+<ul>
+  <li><b>3-5x schneller</b> als RFC-basierte Modi</li>
+  <li><b>Delta Field + Window:</b> Optional — für Zeitraum-gefilterten Export</li>
+  <li><b>Erfordert:</b> SCP/SMB/Local Übertragungsmethode konfiguriert</li>
+  <li><b>Ablauf:</b> Z_EXPORT_TABLE → SCP/SMB Download → BULK INSERT → Z_DELETE_FILE</li>
+</ul>
+
+<h3>Replace Mode</h3>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Modus</th><th>Verhalten</th><th>Wann verwenden?</th></tr>
+<tr><td><b>append</b></td><td>Nur INSERT, nichts löschen</td><td>Erst-Load, Daten nur hinzufügen</td></tr>
+<tr><td><b>replace_all</b></td><td>TRUNCATE Zieltabelle, dann INSERT</td><td>Full-Load, kleine Tabellen</td></tr>
+<tr><td><b>replace_window</b></td><td>DELETE Zeitraum in Zieltabelle, dann INSERT</td><td>Timeframe-Delta, vermeidet Duplikate</td></tr>
+</table>
+
+<h3>Window (Zeitfenster)</h3>
+<p><b>Wichtig:</b> Es wird immer der <b>aktuelle UND der vorherige Zeitraum</b> geladen und ersetzt. Diese Überlappung verhindert Datenverlust beim Periodenwechsel.</p>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Fenster</th><th>Geladen wird</th><th>Woche gilt</th></tr>
+<tr><td><b>day</b></td><td>Gestern + heute</td><td>—</td></tr>
+<tr><td><b>week</b></td><td>Letzte Woche (Mo-So) + diese Woche</td><td>Montag bis Sonntag</td></tr>
+<tr><td><b>month</b></td><td>Letzter Monat + aktueller Monat</td><td>—</td></tr>
+<tr><td><b>year</b></td><td>Letztes Jahr + aktuelles Jahr</td><td>—</td></tr>
+<tr><td><b>all</b></td><td>Komplette Tabelle (TRUNCATE + INSERT)</td><td>—</td></tr>
+</table>
+"""
+
+    def _help_run(self):
+        return """<h2>Ausführen</h2>
+
+<p>In diesem Tab starten Sie Replikationsvorgänge und überwachen den Fortschritt.</p>
+
+<h3>Aktionen</h3>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Schaltfläche</th><th>Funktion</th></tr>
+<tr><td><b>Alle aktiven Tabellen syncen</b></td><td>Führt Sync für alle aktiven Tabellen aus (Tab "Tabellen" → Aktiv ☑)</td></tr>
+<tr><td><b>Ausgewählte Tabelle syncen</b></td><td>Sync nur für die im Tab "Tabellen" markierte Tabelle</td></tr>
+<tr><td><b>CDC initialisieren</b></td><td>Prüft/legt Trigger + Log-Tabelle für alle CDC-Tabellen an. Idempotent — kann mehrfach ausgeführt werden.</td></tr>
+<tr><td><b>CDC entfernen</b></td><td>Entfernt CDC für die ausgewählte Tabelle (Trigger + Log-Tabelle werden gelöscht). Mit Bestätigungsdialog.</td></tr>
+<tr><td><b>Schema erstellen</b></td><td>Erstellt Tabelle + Indizes in MSSQL aus SAP-Metadaten (DD03L, DD12L, DD17S). DROP + CREATE TABLE.</td></tr>
+<tr><td><b>Alle Schemata erstellen</b></td><td>Schema-Erstellung für alle aktiven Tabellen.</td></tr>
+<tr><td><b>Abbrechen</b></td><td>Bricht einen laufenden Sync ab (nur während Sync aktiv)</td></tr>
+</table>
+
+<h3>Fortschritts-Tabelle</h3>
+<p>Zeigt pro Tabelle den Status und die Uhrzeit an:</p>
+<ul>
+  <li><span style="color:#0066CC">Blau "Running..."</span> — Sync läuft</li>
+  <li><span style="color:#008800">Grün "✓ Success"</span> — Erfolgreich abgeschlossen</li>
+  <li><span style="color:#CC0000">Rot "✗ Failed" / "✗ Error"</span> — Fehler aufgetreten</li>
+</ul>
+
+<h3>Protokoll</h3>
+<p>Echtzeit-Log-Ausgabe mit farblichen Level-Markierungen:</p>
+<ul>
+  <li><span style="color:#000000">Schwarz</span> — INFO (normale Meldungen)</li>
+  <li><span style="color:#CC8800">Orange</span> — WARNING (Warnungen)</li>
+  <li><span style="color:#CC0000">Rot</span> — ERROR (Fehler)</li>
+</ul>
+<p><b>Protokoll löschen:</b> Leert die Log-Ausgabe (nur Anzeige, Log-Datei wird nicht gelöscht).</p>
+<p>Sync läuft in einem Hintergrund-Thread — die GUI bleibt bedienbar während des Syncs.</p>
+
+<h3>Empfohlerte Reihenfolge</h3>
+<ol>
+  <li><b>Schema erstellen</b> (einmalig oder nach SAP-Änderungen) — erstellt Tabellen + Indizes</li>
+  <li><b>Sync</b> — lädt Daten (erst-Load oder Delta)</li>
+  <li><b>CDC initialisieren</b> (nur für CDC-Tabellen) — aktiviert Trigger</li>
+</ol>
+"""
+
+    def _help_schedule(self):
+        return """<h2>Zeitplan</h2>
+
+<p>In diesem Tab richten Sie automatische regelmäßige Ausführungen ein — entweder über den eingebauten Scheduler (GUI muss offen sein) oder als Windows-Aufgabe (läuft automatisch).</p>
+
+<h3>Eingebauter Scheduler</h3>
+<p>Läuft als Timer im GUI-Client. Prüft jede Minute ob ein Job fällig ist. Die GUI muss dafür offen bleiben.</p>
+
+<h4>Job-Liste</h4>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Feld</th><th>Beschreibung</th><th>Beispiel</th></tr>
+<tr><td><b>Tabelle</b></td><td>Name der SAP-Tabelle (muss im Tab "Tabellen" konfiguriert sein)</td><td>MARA</td></tr>
+<tr><td><b>Intervall</b></td><td>Wie oft soll der Job laufen? (Dropdown)</td><td>daily</td></tr>
+<tr><td><b>Modus</b></td><td>Was soll ausgeführt werden? sync / sync_schema / init_only</td><td>sync</td></tr>
+<tr><td><b>Window</b></td><td>Zeitfenster für sync (day, week, month, year, all)</td><td>day</td></tr>
+<tr><td><b>Aktiv</b></td><td>Checkbox — nur aktive Jobs werden ausgeführt</td><td>☑</td></tr>
+</table>
+
+<h4>Verfügbare Intervalle</h4>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Intervall</th><th>Alle...</th><th>Typische Verwendung</th></tr>
+<tr><td>hourly</td><td>1 Stunde</td><td>Häufige Deltas bei Bewegungsdaten</td></tr>
+<tr><td>every2h</td><td>2 Stunden</td><td>—</td></tr>
+<tr><td>every4h</td><td>4 Stunden</td><td>Mittelfrequente Synchronisation</td></tr>
+<tr><td>every6h</td><td>6 Stunden</td><td>4x täglich</td></tr>
+<tr><td>daily</td><td>24 Stunden</td><td>Standard für nächtliche Synchronisation</td></tr>
+<tr><td>weekly</td><td>7 Tage</td><td>Wöchentlicher Full-Load</td></tr>
+</table>
+
+<h4>Schaltflächen</h4>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Schaltfläche</th><th>Funktion</th></tr>
+<tr><td><b>+ Job hinzufügen</b></td><td>Neue Job-Zeile</td></tr>
+<tr><td><b>- Job entfernen</b></td><td>Ausgewählte Job-Zeile löschen</td></tr>
+<tr><td><b>Speichern</b></td><td>Jobs in config.json speichern</td></tr>
+<tr><td><b>Scheduler starten</b></td><td>Timer aktivieren — prüft jede Minute auf fällige Jobs</td></tr>
+<tr><td><b>Scheduler stoppen</b></td><td>Timer deaktivieren</td></tr>
+</table>
+
+<h3>Windows-Aufgabe erstellen</h3>
+<p>Erstellt eine Windows-Aufgabe im Task Scheduler, die den CLI-Client regelmäßig aufruft. <b>Läuft auch wenn der GUI-Client geschlossen ist.</b> Keine Windows-Sitzung nötig.</p>
+
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Feld</th><th>Beschreibung</th><th>Beispiel</th></tr>
+<tr><td><b>Aufgabenname</b></td><td>Name der Windows-Aufgabe (im Task Scheduler)</td><td>SAP_Replication_Daily</td></tr>
+<tr><td><b>Startzeit</b></td><td>Uhrzeit für daily/weekly (Format HH:MM)</td><td>02:00</td></tr>
+<tr><td><b>Intervall</b></td><td>daily / weekly / hourly / every2h / every4h / every6h</td><td>daily</td></tr>
+<tr><td><b>Aktion</b></td><td>sync / sync_schema / init_only</td><td>sync</td></tr>
+<tr><td><b>Ausführen als</b></td><td>Windows-Account für die Aufgabe. SYSTEM = läuft ohne Anmeldung. Alternativ: DOMÄNE\\service_user</td><td>SYSTEM</td></tr>
+<tr><td><b>Passwort</b></td><td>Passwort für Service-Account (leer bei SYSTEM)</td><td>********</td></tr>
+<tr><td><b>Mit höchsten Privilegien</b></td><td>/RL HIGHEST — empfohlen für Datenbank-Zugriff</td><td>☑</td></tr>
+<tr><td><b>Auch ausführen, wenn nicht angemeldet</b></td><td>Aufgabe läuft ohne Windows-Sitzung</td><td>☑</td></tr>
+</table>
+
+<h4>Was passiert beim Klick auf "Windows-Aufgabe erstellen"</h4>
+<ol>
+  <li>Eine <b>.bat-Datei</b> wird generiert (ruft sap_replicate.py auf)</li>
+  <li>Der <b>schtasks-Befehl</b> wird ausgeführt → erstellt die Aufgabe im Windows Task Scheduler</li>
+  <li>Logs werden automatisch in <code>logs/sap_replicate_YYYYMMDD.log</code> geschrieben</li>
+  <li>Der Exit-Code wird an Windows Task Scheduler weitergegeben</li>
+</ol>
+<p><b>Hinweis:</b> Die Erstellung der Windows-Aufgabe erfordert evtl. Administrator-Rechte. Falls dies fehlschlägt, wird die .bat-Datei trotzdem erstellt und der schtasks-Befehl angezeigt — Sie können ihn dann manuell in einer Admin-Eingabeaufforderung ausführen.</p>
+
+<h4>Empfohlene Kombination</h4>
+<table border="1" cellpadding="4" cellspacing="0">
+<tr><th>Szenario</th><th>Ansatz</th></tr>
+<tr><td>Nächtlicher Sync um 2:00 Uhr</td><td>Windows-Aufgabe, daily, 02:00, SYSTEM</td></tr>
+<tr><td>Stündliche Deltas für Bewegungsdaten</td><td>Eingebauter Scheduler (GUI offen) oder Windows-Aufgabe hourly</td></tr>
+<tr><td>Wöchentlicher Full-Load am Wochenende</td><td>Windows-Aufgabe, weekly, 01:00, window=all</td></tr>
+<tr><td>CDC Trigger-Check nach Upgrade</td><td>Windows-Aufgabe, daily, action=init_only</td></tr>
+</table>
+"""
 
     def closeEvent(self, event):
         if hasattr(self, 'run_tab') and self.run_tab.worker and self.run_tab.worker.isRunning():
