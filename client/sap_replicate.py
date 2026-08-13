@@ -524,13 +524,22 @@ class FullLoadReplicator:
 # ============================================================================
 
 class FlatfileReplicator:
-    """Flatfile-based replication: Z_EXPORT_TABLE → SCP → BULK INSERT."""
+    """Flatfile-based replication: Z_EXPORT_TABLE → download → BULK INSERT.
+
+    Download methods (configured per table or globally):
+      - 'scp':  SCP over SSH (for Linux SAP servers without Samba)
+      - 'smb':  Windows network share (UNC path, e.g. \\sap-server\sap\tmp\)
+      - 'local': File is already accessible on local filesystem (e.g. mounted NFS)
+    """
 
     def __init__(self, sap: SapConnection, sql: SqlServerConnection,
-                 ssh_config: dict = None):
+                 ssh_config: dict = None, transfer_method: str = 'scp',
+                 smb_share: str = None):
         self.sap = sap
         self.sql = sql
-        self.ssh_config = ssh_config  # For SCP file transfer from SAP server
+        self.ssh_config = ssh_config
+        self.transfer_method = transfer_method  # 'scp', 'smb', 'local'
+        self.smb_share = smb_share  # e.g. r'\\sap-server\sap\tmp'
 
     def _get_window_dates(self, window: str) -> Tuple[str, str]:
         """Calculate from/to dates for the given window."""
@@ -550,9 +559,20 @@ class FlatfileReplicator:
             return '', ''
 
     def _download_file(self, remote_path: str, local_path: str) -> bool:
-        """Download file from SAP server via SCP/SFTP."""
+        """Download file from SAP server — supports SCP, SMB, and local methods."""
+        import shutil
+
+        if self.transfer_method == 'smb':
+            return self._download_smb(remote_path, local_path)
+        elif self.transfer_method == 'local':
+            return self._download_local(remote_path, local_path)
+        else:
+            return self._download_scp(remote_path, local_path)
+
+    def _download_scp(self, remote_path: str, local_path: str) -> bool:
+        """Download file via SCP over SSH."""
         if not self.ssh_config:
-            log.error("  No SSH/SCP config — cannot download file from SAP server")
+            log.error("  No SSH/SCP config — cannot download file via SCP")
             return False
 
         import subprocess
@@ -568,15 +588,73 @@ class FlatfileReplicator:
         cmd.append(local_path)
 
         try:
-            log.info(f"  Downloading {remote_path} → {local_path}")
+            log.info(f"  Downloading via SCP: {remote_path} → {local_path}")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
             if result.returncode != 0:
                 log.error(f"  SCP failed: {result.stderr}")
                 return False
-            log.info(f"  Download complete")
+            log.info(f"  SCP download complete")
             return True
         except Exception as e:
             log.error(f"  SCP error: {e}")
+            return False
+
+    def _download_smb(self, remote_path: str, local_path: str) -> bool:
+        """Download file via SMB/Windows share (UNC path).
+        
+        remote_path is the Unix path on the SAP server (e.g. /usr/sap/tmp/file.csv).
+        The smb_share config maps this to a UNC path (e.g. \\sap-server\sap\tmp\).
+        We extract the filename and build the UNC path.
+        """
+        import shutil
+        import os
+
+        if not self.smb_share:
+            log.error("  No SMB share configured — cannot download via SMB")
+            return False
+
+        # Extract filename from remote path
+        filename = os.path.basename(remote_path)
+
+        # Build UNC path: \\server\share\filename
+        # smb_share should be like \\sap-server\sap\tmp (no trailing backslash)
+        smb_path = os.path.join(self.smb_share, filename)
+
+        try:
+            log.info(f"  Downloading via SMB: {smb_path} → {local_path}")
+            shutil.copy2(smb_path, local_path)
+            log.info(f"  SMB download complete")
+            return True
+        except FileNotFoundError:
+            log.error(f"  File not found on SMB share: {smb_path}")
+            return False
+        except PermissionError:
+            log.error(f"  Permission denied accessing SMB share: {smb_path}")
+            return False
+        except Exception as e:
+            log.error(f"  SMB download error: {e}")
+            return False
+
+    def _download_local(self, remote_path: str, local_path: str) -> bool:
+        """File is already accessible on local filesystem (NFS mount, etc.).
+        
+        remote_path is directly accessible from the Python client.
+        Just copy it to the temp location.
+        """
+        import shutil
+        import os
+
+        if not os.path.exists(remote_path):
+            log.error(f"  File not found locally: {remote_path}")
+            return False
+
+        try:
+            log.info(f"  Copying local file: {remote_path} → {local_path}")
+            shutil.copy2(remote_path, local_path)
+            log.info(f"  Local copy complete")
+            return True
+        except Exception as e:
+            log.error(f"  Local copy error: {e}")
             return False
 
     def _bulk_insert_csv(self, csv_path: str, target_table: str,
@@ -815,7 +893,12 @@ def run_table(table_cfg: dict, sap: SapConnection, sql: SqlServerConnection,
 
         elif mode == 'flatfile':
             ssh_config = config.get('ssh') if config else None
-            replicator = FlatfileReplicator(sap, sql, ssh_config)
+            flatfile_cfg = config.get('flatfile', {}) if config else {}
+            transfer_method = flatfile_cfg.get('transfer_method', 'scp')
+            smb_share = flatfile_cfg.get('smb_share', '')
+            replicator = FlatfileReplicator(sap, sql, ssh_config,
+                                             transfer_method=transfer_method,
+                                             smb_share=smb_share)
             return replicator.sync_table(
                 table=table,
                 target_table=target_table,

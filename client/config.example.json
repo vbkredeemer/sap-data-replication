@@ -16,6 +16,10 @@
     "key_file": "C:\\keys\\sap_id_rsa",
     "port": 22
   },
+  "flatfile": {
+    "transfer_method": "scp",
+    "smb_share": "\\\\sap-server\\sap\\tmp"
+  },
   "tables": [
     {
       "name": "MARA",

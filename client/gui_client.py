@@ -306,6 +306,22 @@ class SettingsTab(QWidget):
         ssh_group.setLayout(ssh_form)
         layout.addWidget(ssh_group)
 
+        # --- Flatfile Transfer Method ---
+        ff_group = QGroupBox("Flatfile-Übertragung")
+        ff_form = QFormLayout()
+
+        self.ff_method = QComboBox()
+        self.ff_method.addItems(['scp', 'smb', 'local'])
+        self.ff_method.currentTextChanged.connect(self._on_method_changed)
+        ff_form.addRow("Übertragungsmethode:", self.ff_method)
+
+        self.ff_smb_share = QLineEdit()
+        self.ff_smb_share.setPlaceholderText(r"\\sap-server\sap\tmp")
+        ff_form.addRow("SMB-Share (UNC-Pfad):", self.ff_smb_share)
+
+        ff_group.setLayout(ff_form)
+        layout.addWidget(ff_group)
+
         # --- Buttons ---
         btn_layout = QHBoxLayout()
         self.btn_save = QPushButton("Speichern")
@@ -327,6 +343,16 @@ class SettingsTab(QWidget):
         if path:
             self.ssh_key.setText(path)
 
+    def _on_method_changed(self, method: str):
+        """Enable/disable SMB share field based on transfer method."""
+        self.ff_smb_share.setEnabled(method == 'smb')
+        if method == 'scp':
+            self.ff_smb_share.setPlaceholderText("(nicht verwendet bei SCP)")
+        elif method == 'smb':
+            self.ff_smb_share.setPlaceholderText(r"\\sap-server\sap\tmp")
+        elif method == 'local':
+            self.ff_smb_share.setPlaceholderText("(nicht verwendet bei Local)")
+
     def _load_values(self):
         sap = self.config.get('sap', {})
         self.sap_host.setText(sap.get('ashost', ''))
@@ -345,6 +371,11 @@ class SettingsTab(QWidget):
         self.ssh_key.setText(ssh.get('key_file', ''))
         self.ssh_port.setValue(ssh.get('port', 22))
 
+        ff = self.config.get('flatfile', {})
+        self.ff_method.setCurrentText(ff.get('transfer_method', 'scp'))
+        self.ff_smb_share.setText(ff.get('smb_share', ''))
+        self._on_method_changed(self.ff_method.currentText())
+
     def _save(self):
         self.config['sap'] = {
             'ashost': self.sap_host.text(),
@@ -362,6 +393,10 @@ class SettingsTab(QWidget):
             'user': self.ssh_user.text(),
             'key_file': self.ssh_key.text(),
             'port': self.ssh_port.value()
+        }
+        self.config['flatfile'] = {
+            'transfer_method': self.ff_method.currentText(),
+            'smb_share': self.ff_smb_share.text()
         }
         try:
             self.config_manager.set(self.config)
