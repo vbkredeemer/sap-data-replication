@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
 TABLE_MODES = ["cdc", "timeframe", "full", "flatfile"]
 WINDOW_OPTIONS = ["day", "week", "month", "year", "all"]
 REPLACE_MODES = ["append", "replace_all", "replace_window"]
+SCHEDULE_INTERVALS = ["hourly", "every2h", "every4h", "every6h", "daily", "weekly"]
 
 
 class ConfigManager:
@@ -872,6 +873,423 @@ class RunTab(QWidget):
 
 
 # ============================================================================
+# Schedule Tab — job scheduler + Windows Task export
+# ============================================================================
+
+class ScheduleTab(QWidget):
+    """Job scheduling: built-in scheduler + Windows Task Scheduler export."""
+
+    def __init__(self, config_manager: ConfigManager,
+                 tables_tab: TablesTab, run_tab: RunTab):
+        super().__init__()
+        self.config_manager = config_manager
+        self.tables_tab = tables_tab
+        self.run_tab = run_tab
+        self.scheduler_timer = None
+        self.scheduler_running = False
+        self.last_run_time = {}
+        self._build_ui()
+        self._load_schedules()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # --- Built-in Scheduler ---
+        sched_group = QGroupBox("Eingebauter Scheduler (läuft, während GUI offen ist)")
+        sched_layout = QVBoxLayout()
+
+        # Schedule table
+        self.sched_table = QTableWidget()
+        self.sched_table.setColumnCount(5)
+        self.sched_table.setHorizontalHeaderLabels([
+            "Tabelle", "Intervall", "Modus", "Window", "Aktiv"
+        ])
+        self.sched_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.sched_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.sched_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.sched_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.sched_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        sched_layout.addWidget(self.sched_table)
+
+        # Scheduler controls
+        sched_btn_layout = QHBoxLayout()
+        self.btn_add_sched = QPushButton("+ Job hinzufügen")
+        self.btn_add_sched.clicked.connect(self._add_schedule)
+        self.btn_del_sched = QPushButton("- Job entfernen")
+        self.btn_del_sched.clicked.connect(self._del_schedule)
+        self.btn_save_sched = QPushButton("Speichern")
+        self.btn_save_sched.clicked.connect(self._save_schedules)
+        self.btn_start_sched = QPushButton("Scheduler starten")
+        self.btn_start_sched.clicked.connect(self._start_scheduler)
+        self.btn_start_sched.setStyleSheet("font-weight: bold;")
+        self.btn_stop_sched = QPushButton("Scheduler stoppen")
+        self.btn_stop_sched.clicked.connect(self._stop_scheduler)
+        self.btn_stop_sched.setEnabled(False)
+        self.btn_stop_sched.setStyleSheet("color: #CC0000; font-weight: bold;")
+
+        sched_btn_layout.addWidget(self.btn_add_sched)
+        sched_btn_layout.addWidget(self.btn_del_sched)
+        sched_btn_layout.addStretch()
+        sched_btn_layout.addWidget(self.btn_save_sched)
+        sched_btn_layout.addStretch()
+        sched_btn_layout.addWidget(self.btn_start_sched)
+        sched_btn_layout.addWidget(self.btn_stop_sched)
+        sched_layout.addLayout(sched_btn_layout)
+
+        # Status label
+        self.sched_status = QLabel("Scheduler: gestoppt")
+        self.sched_status.setStyleSheet("color: #888; font-style: italic;")
+        sched_layout.addWidget(self.sched_status)
+
+        sched_group.setLayout(sched_layout)
+        layout.addWidget(sched_group)
+
+        # --- Windows Task Scheduler Export ---
+        win_group = QGroupBox("Windows-Aufgabe erstellen (läuft auch wenn GUI geschlossen ist)")
+        win_layout = QVBoxLayout()
+
+        win_form = QFormLayout()
+
+        self.task_name = QLineEdit("SAP_Replication_Daily")
+        win_form.addRow("Aufgabenname:", self.task_name)
+
+        self.task_time = QLineEdit("02:00")
+        self.task_time.setMaximumWidth(80)
+        self.task_time.setPlaceholderText("HH:MM")
+        win_form.addRow("Startzeit:", self.task_time)
+
+        self.task_interval = QComboBox()
+        self.task_interval.addItems(["daily", "weekly", "hourly", "every2h", "every4h", "every6h"])
+        self.task_interval.currentTextChanged.connect(self._on_task_interval_changed)
+        win_form.addRow("Intervall:", self.task_interval)
+
+        self.task_mode = QComboBox()
+        self.task_mode.addItems(["sync", "sync_schema", "init_only"])
+        win_form.addRow("Aktion:", self.task_mode)
+
+        win_layout.addLayout(win_form)
+
+        # Export button
+        self.btn_export_task = QPushButton("Windows-Aufgabe erstellen (als .bat + .xml Export)")
+        self.btn_export_task.clicked.connect(self._export_windows_task)
+        self.btn_export_task.setStyleSheet("font-weight: bold;")
+        win_layout.addWidget(self.btn_export_task)
+
+        # Info text
+        info = QLabel(
+            "Erstellt eine .bat-Datei und eine Windows-Aufgabe, die den CLI-Client\n"
+            "regelmäßig aufruft. Funktioniert unabhängig vom GUI-Client.\n"
+            "Die Aufgabe wird im Windows Task Scheduler unter dem angegebenen Namen angelegt."
+        )
+        info.setStyleSheet("color: #666; font-size: 11px;")
+        win_layout.addWidget(info)
+
+        win_group.setLayout(win_layout)
+        layout.addWidget(win_group)
+
+        layout.addStretch()
+
+    def _on_task_interval_changed(self, interval: str):
+        if interval == "daily":
+            self.task_time.setEnabled(True)
+            self.task_time.setText("02:00")
+        elif interval == "weekly":
+            self.task_time.setEnabled(True)
+            self.task_time.setText("02:00")
+        else:
+            # Hourly intervals — time is irrelevant
+            self.task_time.setEnabled(False)
+            self.task_time.setText("00:00")
+
+    def _load_schedules(self):
+        config = self.config_manager.get()
+        schedules = config.get('schedules', [])
+        self.sched_table.setRowCount(len(schedules))
+        for i, s in enumerate(schedules):
+            self._set_sched_row(i, s)
+
+    def _set_sched_row(self, row: int, s: dict):
+        self.sched_table.setItem(row, 0, QTableWidgetItem(s.get('table', '')))
+
+        interval_combo = QComboBox()
+        interval_combo.addItems(SCHEDULE_INTERVALS)
+        interval_combo.setCurrentText(s.get('interval', 'daily'))
+        self.sched_table.setCellWidget(row, 1, interval_combo)
+
+        mode_combo = QComboBox()
+        mode_combo.addItems(['sync', 'sync_schema', 'init_only'])
+        mode_combo.setCurrentText(s.get('action', 'sync'))
+        self.sched_table.setCellWidget(row, 2, mode_combo)
+
+        window_combo = QComboBox()
+        window_combo.addItems([''] + WINDOW_OPTIONS)
+        window_combo.setCurrentText(s.get('window', 'day'))
+        self.sched_table.setCellWidget(row, 3, window_combo)
+
+        active_check = QCheckBox()
+        active_check.setChecked(s.get('active', True))
+        self.sched_table.setCellWidget(row, 4, active_check)
+
+    def _add_schedule(self):
+        row = self.sched_table.rowCount()
+        self.sched_table.insertRow(row)
+        self._set_sched_row(row, {
+            'table': 'MARA',
+            'interval': 'daily',
+            'action': 'sync',
+            'window': 'day',
+            'active': True
+        })
+
+    def _del_schedule(self):
+        row = self.sched_table.currentRow()
+        if row >= 0:
+            self.sched_table.removeRow(row)
+
+    def _read_sched_row(self, row: int) -> dict:
+        def get_text(col):
+            item = self.sched_table.item(row, col)
+            return item.text() if item else ''
+
+        def get_combo(col):
+            w = self.sched_table.cellWidget(row, col)
+            return w.currentText() if isinstance(w, QComboBox) else ''
+
+        def get_check(col):
+            w = self.sched_table.cellWidget(row, col)
+            return w.isChecked() if isinstance(w, QCheckBox) else True
+
+        return {
+            'table': get_text(0),
+            'interval': get_combo(1),
+            'action': get_combo(2),
+            'window': get_combo(3),
+            'active': get_check(4)
+        }
+
+    def _save_schedules(self):
+        schedules = []
+        for i in range(self.sched_table.rowCount()):
+            s = self._read_sched_row(i)
+            if s['table']:
+                schedules.append(s)
+
+        config = self.config_manager.get()
+        config['schedules'] = schedules
+        try:
+            self.config_manager.set(config)
+            QMessageBox.information(self, "Gespeichert", f"{len(schedules)} Jobs gespeichert.")
+        except Exception as e:
+            QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen: {e}")
+
+    def _interval_to_seconds(self, interval: str) -> int:
+        return {
+            'hourly': 3600,
+            'every2h': 7200,
+            'every4h': 14400,
+            'every6h': 21600,
+            'daily': 86400,
+            'weekly': 604800,
+        }.get(interval, 86400)
+
+    def _start_scheduler(self):
+        # Save first
+        self._save_schedules()
+
+        config = self.config_manager.get()
+        schedules = config.get('schedules', [])
+        active = [s for s in schedules if s.get('active', True)]
+        if not active:
+            QMessageBox.warning(self, "Keine Jobs", "Keine aktiven Jobs im Scheduler.")
+            return
+
+        self.scheduler_running = True
+        self.last_run_time = {}
+
+        # Timer for checking schedules every 60 seconds
+        from PySide6.QtCore import QTimer
+        self.scheduler_timer = QTimer()
+        self.scheduler_timer.timeout.connect(self._check_schedules)
+        self.scheduler_timer.start(60000)  # check every minute
+
+        self.btn_start_sched.setEnabled(False)
+        self.btn_stop_sched.setEnabled(True)
+        self.sched_status.setText(f"Scheduler: läuft ({len(active)} aktive Jobs)")
+        self.sched_status.setStyleSheet("color: #008800; font-weight: bold;")
+
+        # Run immediately for first check
+        self._check_schedules()
+
+    def _stop_scheduler(self):
+        if self.scheduler_timer:
+            self.scheduler_timer.stop()
+            self.scheduler_timer = None
+
+        self.scheduler_running = False
+        self.btn_start_sched.setEnabled(True)
+        self.btn_stop_sched.setEnabled(False)
+        self.sched_status.setText("Scheduler: gestoppt")
+        self.sched_status.setStyleSheet("color: #888; font-style: italic;")
+
+    def _check_schedules(self):
+        if not self.scheduler_running:
+            return
+
+        if self.run_tab.worker and self.run_tab.worker.isRunning():
+            # A sync is already running — skip
+            return
+
+        import time
+        now = time.time()
+        config = self.config_manager.get()
+        schedules = config.get('schedules', [])
+
+        for s in schedules:
+            if not s.get('active', True):
+                continue
+
+            table = s.get('table', '')
+            interval = s.get('interval', 'daily')
+            action = s.get('action', 'sync')
+            window = s.get('window', 'day')
+
+            interval_sec = self._interval_to_seconds(interval)
+            last_run = self.last_run_time.get(table, 0)
+
+            if (now - last_run) >= interval_sec:
+                # Find table config
+                table_cfg = None
+                for t in config.get('tables', []):
+                    if t['name'] == table:
+                        table_cfg = t
+                        break
+
+                if table_cfg:
+                    self.run_tab._log("INFO",
+                        f"Scheduler: starte {action} für {table} (Intervall: {interval})")
+
+                    if action == 'sync':
+                        self.run_tab._start_worker([table_cfg], "sync")
+                    elif action == 'sync_schema':
+                        self.run_tab._start_worker([table_cfg], "sync_schema")
+                    elif action == 'init_only':
+                        self.run_tab._start_worker([table_cfg], "init_only")
+
+                    self.last_run_time[table] = now
+                    break  # Only one job at a time
+
+    def _export_windows_task(self):
+        import subprocess
+        import tempfile
+
+        task_name = self.task_name.text().strip()
+        if not task_name:
+            QMessageBox.warning(self, "Fehler", "Aufgabenname darf nicht leer sein.")
+            return
+
+        interval = self.task_interval.currentText()
+        mode = self.task_mode.currentText()
+        start_time = self.task_time.text().strip()
+
+        # Get paths
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(app_dir, "config.json")
+        python_exe = sys.executable
+        script_path = os.path.join(app_dir, "sap_replicate.py")
+
+        # Build CLI command
+        cli_args = f'--config "{config_path}"'
+        if mode == 'sync_schema':
+            cli_args += ' --sync-schema-all'
+        elif mode == 'init_only':
+            cli_args += ' --init-only'
+        else:
+            cli_args += ' --window day'  # default to daily delta
+
+        # Build .bat file
+        bat_content = f"""@echo off
+REM SAP Data Replication — Auto-generated task: {task_name}
+REM Interval: {interval}
+REM Action: {mode}
+REM Created: {datetime.now().isoformat()}
+
+cd /d "{app_dir}"
+"{python_exe}" "{script_path}" {cli_args}
+"""
+
+        bat_path = os.path.join(app_dir, f"{task_name}.bat")
+        try:
+            with open(bat_path, 'w', encoding='utf-8') as f:
+                f.write(bat_content)
+        except Exception as e:
+            QMessageBox.critical(self, "Fehler", f".bat-Datei konnte nicht erstellt werden:\n{e}")
+            return
+
+        # Build schtasks command
+        if interval == 'daily':
+            schtasks_cmd = [
+                'schtasks', '/Create', '/TN', task_name,
+                '/TR', f'"{bat_path}"',
+                '/SC', 'DAILY',
+                '/ST', start_time,
+                '/F'  # force overwrite
+            ]
+        elif interval == 'weekly':
+            schtasks_cmd = [
+                'schtasks', '/Create', '/TN', task_name,
+                '/TR', f'"{bat_path}"',
+                '/SC', 'WEEKLY',
+                '/ST', start_time,
+                '/F'
+            ]
+        elif interval == 'hourly':
+            schtasks_cmd = [
+                'schtasks', '/Create', '/TN', task_name,
+                '/TR', f'"{bat_path}"',
+                '/SC', 'HOURLY',
+                '/F'
+            ]
+        else:
+            # every2h, every4h, every6h — use MINUTE with different values
+            minutes = {
+                'every2h': 120,
+                'every4h': 240,
+                'every6h': 360
+            }.get(interval, 120)
+            schtasks_cmd = [
+                'schtasks', '/Create', '/TN', task_name,
+                '/TR', f'"{bat_path}"',
+                '/SC', 'MINUTE',
+                '/MO', str(minutes),
+                '/F'
+            ]
+
+        try:
+            result = subprocess.run(schtasks_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                QMessageBox.information(self, "Erfolg",
+                    f"Windows-Aufgabe '{task_name}' wurde erstellt.\n\n"
+                    f".bat-Datei: {bat_path}\n\n"
+                    f"Die Aufgabe läuft automatisch im Windows Task Scheduler.\n"
+                    f"Der GUI-Client muss dafür nicht geöffnet sein.")
+            else:
+                # May need admin privileges
+                QMessageBox.warning(self, "Hinweis",
+                    f"Windows-Aufgabe konnte nicht erstellt werden (Admin-Rechte nötig?).\n\n"
+                    f"Bitte als Administrator ausführen oder manuell anlegen:\n\n"
+                    f".bat-Datei wurde erstellt: {bat_path}\n\n"
+                    f"schtasks-Befehl:\n{' '.join(schtasks_cmd)}\n\n"
+                    f"Fehler: {result.stderr}")
+        except Exception as e:
+            QMessageBox.critical(self, "Fehler",
+                f"Windows-Aufgabe konnte nicht erstellt werden:\n{e}\n\n"
+                f".bat-Datei wurde erstellt: {bat_path}")
+
+    def closeEvent(self, event):
+        self._stop_scheduler()
+
+
+# ============================================================================
 # Main Window
 # ============================================================================
 
@@ -900,10 +1318,12 @@ class MainWindow(QMainWindow):
         self.settings_tab = SettingsTab(self.config_manager)
         self.tables_tab = TablesTab(self.config_manager)
         self.run_tab = RunTab(self.config_manager, self.tables_tab)
+        self.schedule_tab = ScheduleTab(self.config_manager, self.tables_tab, self.run_tab)
 
         self.tabs.addTab(self.settings_tab, "Verbindungen")
         self.tabs.addTab(self.tables_tab, "Tabellen")
         self.tabs.addTab(self.run_tab, "Ausführen")
+        self.tabs.addTab(self.schedule_tab, "Zeitplan")
 
         layout.addWidget(self.tabs)
 
@@ -975,6 +1395,9 @@ class MainWindow(QMainWindow):
                 return
             self.run_tab.worker.cancel()
             self.run_tab.worker.wait(5000)
+        # Stop scheduler if running
+        if hasattr(self, 'schedule_tab'):
+            self.schedule_tab._stop_scheduler()
         event.accept()
 
 

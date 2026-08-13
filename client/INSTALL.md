@@ -37,10 +37,11 @@ pyinstaller sap_replication_client.spec
 :: → dist\SAPDataReplication.exe
 ```
 
-Der GUI-Client hat drei Tabs:
+Der GUI-Client hat vier Tabs:
 1. **Verbindungen** — SAP, SQL Server, SSH konfigurieren + testen
 2. **Tabellen** — Tabellen-Liste mit Modus-Konfiguration pro Tabelle
-3. **Ausführen** — Sync starten, CDC initialisieren, Log-Ausgabe
+3. **Ausführen** — Sync starten, CDC initialisieren, Schema erstellen, Log-Ausgabe
+4. **Zeitplan** — Eingebauter Scheduler + Windows-Aufgabe erstellen
 
 ### Variante B: Kommandozeile
 
