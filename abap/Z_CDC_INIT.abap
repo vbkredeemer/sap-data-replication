@@ -77,14 +77,14 @@ FUNCTION Z_CDC_INIT.
   DATA: lv_tab_len TYPE i,
         lv_hash    TYPE i.
 
-  lv_tab_len = strlen( iv_table ).
+  lv_tab_len = strlen( lv_check_table ).
 
   IF lv_tab_len > 18.
     " Table name too long — use hash to keep trigger name < 32 chars
     " Z_ + hash(6) + _CDC_TRG_INS = 3+6+13 = 22 chars (safe)
     CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
       EXPORTING
-        data = iv_table
+        data = lv_check_table
       IMPORTING
         hashstring = DATA(lv_hash_str)
       EXCEPTIONS
@@ -92,15 +92,15 @@ FUNCTION Z_CDC_INIT.
     IF sy-subrc = 0 AND strlen( lv_hash_str ) >= 6.
       DATA(lv_short) = lv_hash_str(6).
     ELSE.
-      lv_short = iv_table(6).
+      lv_short = lv_check_table(6).
     ENDIF.
     CONCATENATE 'Z_' lv_short '_CDC_LOG' INTO lv_log_table.
     CONCATENATE 'Z_' lv_short '_CDC_TRG' INTO lv_trigger_name.
     CONCATENATE 'Z_' lv_short '_CDC_SEQ' INTO lv_seq_name.
   ELSE.
-    CONCATENATE 'Z_' iv_table '_CDC_LOG' INTO lv_log_table.
-    CONCATENATE 'Z_' iv_table '_CDC_TRG' INTO lv_trigger_name.
-    CONCATENATE 'Z_' iv_table '_CDC_SEQ' INTO lv_seq_name.
+    CONCATENATE 'Z_' lv_check_table '_CDC_LOG' INTO lv_log_table.
+    CONCATENATE 'Z_' lv_check_table '_CDC_TRG' INTO lv_trigger_name.
+    CONCATENATE 'Z_' lv_check_table '_CDC_SEQ' INTO lv_seq_name.
   ENDIF.
 
   ev_log_table = lv_log_table.
@@ -271,7 +271,7 @@ FUNCTION Z_CDC_INIT.
   " Create INSERT trigger
   "---------------------------------------------------------------------
   CONCATENATE 'CREATE TRIGGER ' lv_trigger_name '_INS '
-              'AFTER INSERT ON ' iv_table ' '
+              'AFTER INSERT ON ' lv_check_table ' '
               'REFERENCING NEW ROW AS new_row '
               'FOR EACH ROW '
               'BEGIN '
@@ -293,7 +293,7 @@ FUNCTION Z_CDC_INIT.
   " Create UPDATE trigger
   "---------------------------------------------------------------------
   CONCATENATE 'CREATE TRIGGER ' lv_trigger_name '_UPD '
-              'AFTER UPDATE ON ' iv_table ' '
+              'AFTER UPDATE ON ' lv_check_table ' '
               'REFERENCING NEW ROW AS new_row '
               'FOR EACH ROW '
               'BEGIN '
@@ -315,7 +315,7 @@ FUNCTION Z_CDC_INIT.
   " Create DELETE trigger
   "---------------------------------------------------------------------
   CONCATENATE 'CREATE TRIGGER ' lv_trigger_name '_DEL '
-              'AFTER DELETE ON ' iv_table ' '
+              'AFTER DELETE ON ' lv_check_table ' '
               'REFERENCING OLD ROW AS old_row '
               'FOR EACH ROW '
               'BEGIN '

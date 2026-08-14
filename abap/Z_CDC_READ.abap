@@ -74,12 +74,12 @@ FUNCTION Z_CDC_READ.
   " Build log table name (must match Z_CDC_INIT logic)
   "---------------------------------------------------------------------*
   DATA: lv_tab_len TYPE i.
-  lv_tab_len = strlen( iv_table ).
+  lv_tab_len = strlen( lv_check_table ).
 
   IF lv_tab_len > 18.
     CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
       EXPORTING
-        data = iv_table
+        data = lv_check_table
       IMPORTING
         hashstring = DATA(lv_hash_str)
       EXCEPTIONS
@@ -87,11 +87,11 @@ FUNCTION Z_CDC_READ.
     IF sy-subrc = 0 AND strlen( lv_hash_str ) >= 6.
       DATA(lv_short) = lv_hash_str(6).
     ELSE.
-      lv_short = iv_table(6).
+      lv_short = lv_check_table(6).
     ENDIF.
     CONCATENATE 'Z_' lv_short '_CDC_LOG' INTO lv_log_table.
   ELSE.
-    CONCATENATE 'Z_' iv_table '_CDC_LOG' INTO lv_log_table.
+    CONCATENATE 'Z_' lv_check_table '_CDC_LOG' INTO lv_log_table.
   ENDIF.
 
   "---------------------------------------------------------------------*
@@ -109,9 +109,9 @@ FUNCTION Z_CDC_READ.
         ls_component    TYPE abap_componentdescr.
 
   TRY.
-      lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( iv_table ).
+      lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_check_table ).
     CATCH cx_root.
-      ev_error = 'Cannot describe table ' && iv_table.
+      ev_error = 'Cannot describe table ' && lv_check_table.
       RETURN.
   ENDTRY.
 
@@ -129,14 +129,14 @@ FUNCTION Z_CDC_READ.
 
   CALL FUNCTION 'DDIF_NAMETAB_GET'
     EXPORTING
-      tabname   = iv_table
+      tabname   = lv_check_table
     TABLES
       dfies_tab = lt_ddic_keyfields
     EXCEPTIONS
       OTHERS    = 1.
 
   IF sy-subrc <> 0.
-    ev_error = 'Cannot get nametab for ' && iv_table.
+    ev_error = 'Cannot get nametab for ' && lv_check_table.
     RETURN.
   ENDIF.
 
@@ -298,7 +298,7 @@ FUNCTION Z_CDC_READ.
 
       " Read original row
       TRY.
-          SELECT SINGLE * FROM (iv_table) INTO <fs_dynamic>
+          SELECT SINGLE * FROM (lv_check_table) INTO <fs_dynamic>
             WHERE (lv_where).
           IF sy-subrc = 0.
             " Build pipe-delimited row from all fields in ET_FIELDS

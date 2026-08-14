@@ -106,16 +106,16 @@ FUNCTION Z_EXPORT_TABLE.
   "---------------------------------------------------------------------
   CLEAR lv_where.
 
-  IF iv_date_field IS NOT INITIAL.
+  IF lv_check_field IS NOT INITIAL.
     IF iv_date_from IS NOT INITIAL AND iv_date_to IS NOT INITIAL.
-      CONCATENATE iv_date_field ' >= ''' iv_date_from ''''
-                  ' AND ' iv_date_field ' <= ''' iv_date_to ''''
+      CONCATENATE lv_check_field ' >= ''' iv_date_from ''''
+                  ' AND ' lv_check_field ' <= ''' iv_date_to ''''
                   INTO lv_where.
     ELSEIF iv_date_from IS NOT INITIAL.
-      CONCATENATE iv_date_field ' >= ''' iv_date_from ''''
+      CONCATENATE lv_check_field ' >= ''' iv_date_from ''''
                   INTO lv_where.
     ELSEIF iv_date_to IS NOT INITIAL.
-      CONCATENATE iv_date_field ' <= ''' iv_date_to ''''
+      CONCATENATE lv_check_field ' <= ''' iv_date_to ''''
                   INTO lv_where.
     ENDIF.
   ENDIF.
@@ -148,7 +148,7 @@ FUNCTION Z_EXPORT_TABLE.
   WRITE lv_date TO lv_date_str YYYYMMDD.
   WRITE lv_time TO lv_time_str HHMMSS.
 
-  CONCATENATE iv_table '_' lv_date_str '_' lv_time_str '.csv'
+  CONCATENATE lv_check_table '_' lv_date_str '_' lv_time_str '.csv'
               INTO lv_filename.
   CONCATENATE lv_file lv_filename INTO ev_file_name.
 
@@ -160,9 +160,9 @@ FUNCTION Z_EXPORT_TABLE.
         ls_component    TYPE abap_componentdescr.
 
   TRY.
-      lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( iv_table ).
+      lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_check_table ).
     CATCH cx_root.
-      ev_error = 'Cannot describe table ' && iv_table.
+      ev_error = 'Cannot describe table ' && lv_check_table.
       RETURN.
   ENDTRY.
 
@@ -268,7 +268,7 @@ FUNCTION Z_EXPORT_TABLE.
 
   CALL FUNCTION 'DDIF_NAMETAB_GET'
     EXPORTING
-      tabname   = iv_table
+      tabname   = lv_check_table
     TABLES
       dfies_tab = lt_pk_fields
     EXCEPTIONS
@@ -396,12 +396,12 @@ FUNCTION Z_EXPORT_TABLE.
               lv_max_fetch = lv_block_size.
             ENDIF.
 
-            SELECT (lv_select_fields) FROM (iv_table)
+            SELECT (lv_select_fields) FROM (lv_check_table)
               WHERE (lv_pk_where)
               INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS
               ORDER BY (lv_orderby).
           ELSE.
-            SELECT (lv_select_fields) FROM (iv_table)
+            SELECT (lv_select_fields) FROM (lv_check_table)
               WHERE (lv_pk_where)
               INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS
               ORDER BY (lv_orderby).
@@ -417,11 +417,11 @@ FUNCTION Z_EXPORT_TABLE.
               lv_max_fetch = lv_block_size.
             ENDIF.
 
-            SELECT (lv_select_fields) FROM (iv_table)
+            SELECT (lv_select_fields) FROM (lv_check_table)
               INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS
               ORDER BY (lv_orderby).
           ELSE.
-            SELECT (lv_select_fields) FROM (iv_table)
+            SELECT (lv_select_fields) FROM (lv_check_table)
               INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS
               ORDER BY (lv_orderby).
           ENDIF.
