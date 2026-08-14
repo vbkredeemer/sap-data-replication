@@ -188,7 +188,6 @@ class SyncWorker(QThread):
                             cdc.init_table(t['name'], t['key_fields'])
                             self.progress.emit(t['name'], "Init OK")
                             success += 1
-                    self.finished_all.emit(success, fail)
                     return
 
                 if self.action == "remove_cdc":
@@ -199,7 +198,6 @@ class SyncWorker(QThread):
                         cdc.remove_cdc(t['name'])
                         self.progress.emit(t['name'], "Removed")
                         success += 1
-                    self.finished_all.emit(success, fail)
                     return
 
                 if self.action == "sync_schema":
@@ -221,7 +219,6 @@ class SyncWorker(QThread):
                             logging.error(f"Schema error for {t['name']}: {e}")
                             fail += 1
                             self.progress.emit(t['name'], "✗ Error")
-                    self.finished_all.emit(success, fail)
                     return
 
                 # Normal sync

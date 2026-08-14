@@ -371,12 +371,13 @@ class SchemaManager:
             col_defs.append(f"  CONSTRAINT [PK_{target}] PRIMARY KEY ({', '.join(pk_cols)})")
 
         # Drop if exists
+        safe_target = _validate_table_name(target)
         if drop_if_exists:
-            log.info(f"  Dropping dbo.{target} if exists")
-            self.sql.execute(f"IF OBJECT_ID('dbo.{target}', 'U') IS NOT NULL DROP TABLE dbo.{target}")
+            log.info(f"  Dropping dbo.[{safe_target}] if exists")
+            self.sql.execute(f"IF OBJECT_ID('dbo.[{safe_target}]', 'U') IS NOT NULL DROP TABLE dbo.[{safe_target}]")
             self.sql.commit()
 
-        create_sql = f"CREATE TABLE dbo.{target} (\n" + ",\n".join(col_defs) + "\n)"
+        create_sql = f"CREATE TABLE dbo.[{safe_target}] (\n" + ",\n".join(col_defs) + "\n)"
 
         try:
             log.info(f"  Creating table dbo.{target} with {len(fields)} columns")
@@ -552,7 +553,8 @@ class CdcReplicator:
 
         # Determine column names from first row's field count
         # We need the column list — get from a simple SELECT on target table
-        cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.{table}")
+        safe_table = _validate_table_name(table)
+        cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.[{safe_table}]")
         col_names = [desc[0] for desc in cursor.description]
 
         # Validate that all key_fields exist in the target table columns
@@ -588,46 +590,43 @@ class CdcReplicator:
 
         # Batch INSERTs — use MERGE for UPSERT semantics (handles both I and U)
         if inserts:
-            col_list = ','.join(col_names)
+            col_list = ','.join(f"[{c}]" for c in col_names)
             placeholders = ','.join(['?'] * len(col_names))
             # Use MERGE for UPSERT — works for both INSERT (new row) and
             # UPDATE (row already exists from initial load)
-            key_col_list = ','.join(f"[{k}]" for k in key_fields)
+            key_col_list = ' AND '.join(f"target.[{k}] = source.[{k}]" for k in key_fields)
             non_key_cols = [c for c in col_names if c not in key_fields]
             if non_key_cols:
                 set_clause = ','.join(f"target.[{c}] = source.[{c}]" for c in non_key_cols)
                 merge_sql = (
-                    f"MERGE dbo.{table} AS target "
+                    f"MERGE dbo.[{safe_table}] AS target "
                     f"USING (VALUES ({placeholders})) AS source ({col_list}) "
-                    f"ON target.{key_col_list} = source.{key_col_list} "
+                    f"ON {key_col_list} "
                     f"WHEN MATCHED THEN UPDATE SET {set_clause} "
                     f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({placeholders});"
                 )
-                # NOTE: MERGE with executemany requires fast_executemany off
-                # because each row is a separate MERGE statement
                 cursor = self.sql.conn.cursor()
                 for vals in inserts:
                     cursor.execute(merge_sql, vals + vals)
                 self.sql.conn.commit()
             else:
                 # All columns are key fields — plain INSERT
-                insert_sql = f"INSERT INTO dbo.{table} ({col_list}) VALUES ({placeholders})"
+                insert_sql = f"INSERT INTO dbo.[{safe_table}] ({col_list}) VALUES ({placeholders})"
                 self.sql.executemany(insert_sql, inserts)
                 self.sql.commit()
 
         # Batch UPDATEs (executemany with per-row WHERE)
         if updates:
-            col_list = ','.join(col_names)
             for vals in updates:
-                set_clause = ','.join(f"{c} = ?" for c in col_names if c not in key_fields)
-                where = ' AND '.join(f"{k} = ?" for k in key_fields)
+                set_clause = ','.join(f"[{c}] = ?" for c in col_names if c not in key_fields)
+                where = ' AND '.join(f"[{k}] = ?" for k in key_fields)
                 if not set_clause:
                     log.warning(f"  UPDATE skipped — no non-key columns to set")
                     continue
                 update_vals = [v for c, v in zip(col_names, vals) if c not in key_fields]
                 update_vals += [vals[col_names.index(k)] for k in key_fields]
                 self.sql.execute(
-                    f"UPDATE dbo.{table} SET {set_clause} WHERE {where}",
+                    f"UPDATE dbo.[{safe_table}] SET {set_clause} WHERE {where}",
                     update_vals
                 )
             self.sql.commit()
@@ -635,11 +634,10 @@ class CdcReplicator:
         # Batch DELETEs
         if deletes:
             for key_vals in deletes:
-                where = ' AND '.join(f"{k} = ?" for k in key_fields)
-                self.sql.execute(f"DELETE FROM dbo.{table} WHERE {where}", key_vals)
+                where = ' AND '.join(f"[{k}] = ?" for k in key_fields)
+                self.sql.execute(f"DELETE FROM dbo.[{safe_table}] WHERE {where}", key_vals)
             self.sql.commit()
 
-        self.sql.commit()
         return len(rows)
 
     def cleanup(self, table: str, up_to_seq: int):
@@ -668,6 +666,7 @@ class CdcReplicator:
 
     def sync_table(self, table: str, key_fields: str, chunk_size: int = 10000):
         """Full sync cycle: init → read → apply → cleanup."""
+        safe_table = _validate_table_name(table)
         key_field_list = [k.strip() for k in key_fields.split(',')]
 
         # Step 1: Init (check trigger, detect gaps)
@@ -734,12 +733,14 @@ class TimeframeReplicator:
         Always loads current + previous period to prevent data loss at boundaries.
         Deletes the same range in the target table before inserting.
         """
+        safe_table = _validate_table_name(table)
+        safe_delta = _validate_field_name(delta_field)
         date_from, date_to = self._get_window_range(window)
         
         if window == 'all' or not date_from:
             # Full table replace — TRUNCATE + load all
             log.info(f"TIMEFRAME sync: {table} (window=all → full table replace)")
-            self.sql.execute(f"TRUNCATE TABLE dbo.{table}")
+            self.sql.execute(f"TRUNCATE TABLE dbo.[{safe_table}]")
             self.sql.commit()
             where_clause = ""  # no WHERE filter
         else:
@@ -749,9 +750,9 @@ class TimeframeReplicator:
             # Step 1: Delete current+previous period from target
             # Convert YYYYMMDD to YYYY-MM-DD for MSSQL DATE columns
             mssql_date_from = f"{date_from[:4]}-{date_from[4:6]}-{date_from[6:8]}"
-            log.info(f"  Deleting rows from dbo.{table} where {delta_field} >= '{mssql_date_from}'")
+            log.info(f"  Deleting rows from dbo.[{safe_table}] where {safe_delta} >= '{mssql_date_from}'")
             self.sql.execute(
-                f"DELETE FROM dbo.{table} WHERE [{delta_field}] >= ?",
+                f"DELETE FROM dbo.[{safe_table}] WHERE [{safe_delta}] >= ?",
                 (mssql_date_from,)
             )
             self.sql.commit()
@@ -784,13 +785,13 @@ class TimeframeReplicator:
 
             # Get column names from target table (first call)
             if col_names is None:
-                cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.{table}")
+                cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.[{safe_table}]")
                 col_names = [desc[0] for desc in cursor.description]
 
             # Build INSERT batch
             placeholders = ','.join(['?'] * len(col_names))
-            col_list = ','.join(col_names)
-            insert_sql = f"INSERT INTO dbo.{table} ({col_list}) VALUES ({placeholders})"
+            col_list = ','.join(f"[{c}]" for c in col_names)
+            insert_sql = f"INSERT INTO dbo.[{safe_table}] ({col_list}) VALUES ({placeholders})"
 
             batch = []
             for row in data_rows:
@@ -828,11 +829,12 @@ class FullLoadReplicator:
 
     def sync_table(self, table: str, chunk_size: int = 10000):
         """Full load of a table."""
+        safe_table = _validate_table_name(table)
         log.info(f"FULL LOAD: {table}")
 
         # Step 1: Truncate target table
-        log.info(f"  Truncating dbo.{table}")
-        self.sql.execute(f"TRUNCATE TABLE dbo.{table}")
+        log.info(f"  Truncating dbo.[{safe_table}]")
+        self.sql.execute(f"TRUNCATE TABLE dbo.[{safe_table}]")
         self.sql.commit()
 
         # Step 2: Read all data via Z_READ_TABLE
@@ -858,12 +860,12 @@ class FullLoadReplicator:
                 break
 
             if col_names is None:
-                cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.{table}")
+                cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.[{safe_table}]")
                 col_names = [desc[0] for desc in cursor.description]
 
             placeholders = ','.join(['?'] * len(col_names))
-            col_list = ','.join(col_names)
-            insert_sql = f"INSERT INTO dbo.{table} ({col_list}) VALUES ({placeholders})"
+            col_list = ','.join(f"[{c}]" for c in col_names)
+            insert_sql = f"INSERT INTO dbo.[{safe_table}] ({col_list}) VALUES ({placeholders})"
 
             batch = []
             for row in data_rows:
@@ -1031,14 +1033,22 @@ class FlatfileReplicator:
             self.sql.execute(f"TRUNCATE TABLE dbo.{target_table}")
             self.sql.commit()
         elif replace_mode == 'replace_window' and date_field and date_from:
+            safe_date_field = _validate_field_name(date_field)
             # date_from is YYYYMMDD from _get_window_range — convert to YYYY-MM-DD for MSSQL
             mssql_date_from = f"{date_from[:4]}-{date_from[4:6]}-{date_from[6:8]}"
-            where = f"WHERE [{date_field}] >= '{mssql_date_from}'"
             if date_to:
                 mssql_date_to = f"{date_to[:4]}-{date_to[4:6]}-{date_to[6:8]}"
-                where += f" AND [{date_field}] <= '{mssql_date_to}'"
-            log.info(f"  DELETE FROM dbo.{target_table} {where}")
-            self.sql.execute(f"DELETE FROM dbo.{target_table} {where}")
+                log.info(f"  DELETE FROM dbo.[{target_table}] WHERE [{safe_date_field}] >= ? AND [{safe_date_field}] <= ?")
+                self.sql.execute(
+                    f"DELETE FROM dbo.[{target_table}] WHERE [{safe_date_field}] >= ? AND [{safe_date_field}] <= ?",
+                    (mssql_date_from, mssql_date_to)
+                )
+            else:
+                log.info(f"  DELETE FROM dbo.[{target_table}] WHERE [{safe_date_field}] >= ?")
+                self.sql.execute(
+                    f"DELETE FROM dbo.[{target_table}] WHERE [{safe_date_field}] >= ?",
+                    (mssql_date_from,)
+                )
             self.sql.commit()
 
         # Use BULK INSERT via pyodbc (fastest method)
@@ -1063,9 +1073,9 @@ class FlatfileReplicator:
             cursor = self.sql.execute(bulk_sql)
             self.sql.commit()
 
-            # Get row count
-            cursor = self.sql.execute(f"SELECT @@ROWCOUNT")
-            row_count = cursor.fetchone()[0]
+            # Get row count from the BULK INSERT cursor directly
+            # (using @@ROWCOUNT in a separate query would return 1 — the count of SELECT itself)
+            row_count = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
             log.info(f"  BULK INSERT complete: {row_count} rows")
             return row_count
         except Exception as e:

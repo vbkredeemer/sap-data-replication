@@ -110,8 +110,12 @@ FUNCTION Z_EXPORT_TABLE.
   ENDIF.
 
   * Ensure trailing slash
-  IF lv_file+strlen(lv_file)-1(1) <> '/'.
+  DATA: lv_file_len TYPE i.
+  lv_file_len = strlen( lv_file ).
+  IF lv_file_len > 0 AND lv_file+lv_file_len-1(1) <> '/'.
     CONCATENATE lv_file '/' INTO lv_file.
+  ELSEIF lv_file_len = 0.
+    lv_file = '/usr/sap/tmp/'.
   ENDIF.
 
   * Build filename: TABLE_YYYYMMDD_HHMMSS.csv
@@ -254,6 +258,11 @@ FUNCTION Z_EXPORT_TABLE.
     IF sy-subrc = 0.
       lv_orderby = ls_pk_field-fieldname.
     ENDIF.
+  ENDIF.
+
+  * If no PK found, use primary key from DD03L as fallback
+  IF lv_orderby IS INITIAL.
+    lv_orderby = 'MANDT'.
   ENDIF.
 
   WHILE lv_done = abap_false.

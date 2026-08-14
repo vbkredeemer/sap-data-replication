@@ -343,15 +343,12 @@ FUNCTION Z_CDC_READ.
           ELSE.
             * Row not found — INSERT/UPDATE row was deleted before we could read it
             * Skip this entry — do NOT send DELETE (would corrupt data)
-            * Still advance seq pointer to avoid infinite loop
-            lv_max_seq = lv_seq.
-            lv_count = lv_count + 1.
+            * lv_max_seq and lv_count already set above — just skip
             CONTINUE.
           ENDIF.
         CATCH cx_root.
-          * Error reading original row — skip but advance seq pointer
-          lv_max_seq = lv_seq.
-          lv_count = lv_count + 1.
+          * Error reading original row — skip this entry
+          * lv_max_seq and lv_count already set above — just skip
           CONTINUE.
       ENDTRY.
     ENDIF.
