@@ -51,6 +51,21 @@ FUNCTION Z_CDC_READ.
   CLEAR: et_fields[], et_data[].
 
   *---------------------------------------------------------------------*
+  * Validate table name — only alphanumeric and underscore allowed
+  *---------------------------------------------------------------------*
+  IF iv_table IS INITIAL.
+    ev_error = 'IV_TABLE is empty'.
+    RETURN.
+  ENDIF.
+
+  DATA: lv_invalid_char TYPE i.
+  FIND REGEX '[^A-Za-z0-9_]' IN iv_table MATCH COUNT lv_invalid_char.
+  IF lv_invalid_char > 0.
+    ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
+    RETURN.
+  ENDIF.
+
+  *---------------------------------------------------------------------*
   * Build log table name (must match Z_CDC_INIT logic)
   *---------------------------------------------------------------------*
   DATA: lv_tab_len TYPE i.
@@ -75,13 +90,8 @@ FUNCTION Z_CDC_READ.
   ENDIF.
 
   *---------------------------------------------------------------------*
-  * Validate
+  * Validate chunk size
   *---------------------------------------------------------------------*
-  IF iv_table IS INITIAL.
-    ev_error = 'IV_TABLE is empty'.
-    RETURN.
-  ENDIF.
-
   IF iv_chunk_size <= 0.
     iv_chunk_size = 10000.
   ENDIF.
@@ -210,7 +220,8 @@ FUNCTION Z_CDC_READ.
         lv_operation  TYPE c LENGTH 1,
         lv_keyvalues  TYPE string,
         lv_timestmp   TYPE string,
-        lv_max_seq    TYPE i.
+        lv_max_seq    TYPE i,
+        lv_skip_entry TYPE abap_bool.
 
   FIELD-SYMBOLS: <fs_dynamic> TYPE ANY,
                  <fs_field>   TYPE ANY.
@@ -225,12 +236,7 @@ FUNCTION Z_CDC_READ.
 
   WHILE lo_result->next( ) = 0.
     * Read log columns — use get_char for string columns, explicit for int
-    DATA(lv_seq_str) = lo_result->get_char( ).
-    TRY.
-        lv_seq = lv_seq_str.
-      CATCH cx_root.
-        lv_seq = 0.
-    ENDTRY.
+    lv_seq = lo_result->get_int( ).
     lv_operation = lo_result->get_char( ).
     lv_keyvalues = lo_result->get_char( ).
     lv_timestmp = lo_result->get_char( ).
@@ -263,12 +269,14 @@ FUNCTION Z_CDC_READ.
       CLEAR lv_where.
 
       lv_key_idx = 0.
+      CLEAR lv_skip_entry.
       LOOP AT lt_ddic_keyfields INTO ls_ddic_key.
         lv_key_idx = lv_key_idx + 1.
         READ TABLE lt_keys INTO lv_key_value INDEX lv_key_idx.
         IF sy-subrc <> 0.
           * Key value missing — skip this malformed entry
-          CONTINUE.
+          lv_skip_entry = abap_true.
+          EXIT.
         ENDIF.
         * Escape single quotes to prevent SQL injection
         REPLACE ALL OCCURRENCES OF '''' IN lv_key_value WITH ''''''.
@@ -278,6 +286,10 @@ FUNCTION Z_CDC_READ.
           CONCATENATE lv_where ' AND ' ls_ddic_key-fieldname ' = ''' lv_key_value '''' INTO lv_where SEPARATED BY space.
         ENDIF.
       ENDLOOP.
+
+      IF lv_skip_entry = abap_true.
+        CONTINUE.
+      ENDIF.
 
       * Read original row
       TRY.
@@ -367,6 +379,9 @@ FUNCTION Z_CDC_READ.
     ls_data-rowdata = lv_rowdata.
     APPEND ls_data TO et_data.
     lv_count = lv_count + 1.
+    IF lv_count >= iv_chunk_size.
+      EXIT.
+    ENDIF.
   ENDWHILE.
 
   TRY.
@@ -379,12 +394,20 @@ FUNCTION Z_CDC_READ.
   *---------------------------------------------------------------------*
   ev_row_count = lv_count.
   IF lv_count = 0.
-    * No entries found — return the same SEQ the client sent
-    ev_next_seq = iv_from_seq.
-    * No more data when nothing was found
-    ev_has_more = ' '.
+    * No entries found — check if we skipped entries or truly at end
+    IF lv_max_seq > 0.
+      ev_next_seq = lv_max_seq + 1.
+      ev_has_more = 'X'.
+    ELSE.
+      ev_next_seq = iv_from_seq.
+      ev_has_more = ' '.
+    ENDIF.
   ELSE.
-    ev_next_seq = lv_max_seq + 1.
+    IF lv_max_seq < iv_from_seq.
+      ev_next_seq = iv_from_seq.
+    ELSE.
+      ev_next_seq = lv_max_seq + 1.
+    ENDIF.
 
     * Check if there are more entries — query with iv_from_seq, not lv_max_seq
     * to avoid counting already-processed entries

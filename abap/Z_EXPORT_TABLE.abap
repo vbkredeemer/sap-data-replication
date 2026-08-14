@@ -71,6 +71,13 @@ FUNCTION Z_EXPORT_TABLE.
     RETURN.
   ENDIF.
 
+  DATA: lv_invalid_char TYPE i.
+  FIND REGEX '[^A-Za-z0-9_]' IN iv_table MATCH COUNT lv_invalid_char.
+  IF lv_invalid_char > 0.
+    ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
+    RETURN.
+  ENDIF.
+
   *---------------------------------------------------------------------
   * Build field list
   *---------------------------------------------------------------------
@@ -173,6 +180,18 @@ FUNCTION Z_EXPORT_TABLE.
     lv_all_fields = abap_false.
     SPLIT lv_fields AT ',' INTO TABLE lt_export_fields.
   ENDIF.
+
+  *---------------------------------------------------------------------*
+  * Validate field names — only alphanumeric and underscore allowed
+  *---------------------------------------------------------------------*
+  LOOP AT lt_export_fields INTO lv_fieldname.
+    CONDENSE lv_fieldname.
+    FIND REGEX '[^A-Za-z0-9_]' IN lv_fieldname MATCH COUNT DATA(lv_bad_field).
+    IF lv_bad_field > 0.
+      ev_error = 'Invalid field name (only A-Z, 0-9, underscore allowed): ' && lv_fieldname.
+      RETURN.
+    ENDIF.
+  ENDLOOP.
 
   *---------------------------------------------------------------------
   * Build CSV header line
@@ -279,6 +298,10 @@ FUNCTION Z_EXPORT_TABLE.
     IF sy-subrc = 0.
       lv_orderby = ls_component-name.
     ENDIF.
+  ENDIF.
+
+  IF lv_orderby IS INITIAL.
+    lv_orderby = '1'.
   ENDIF.
 
   * Build field type map for conversion (before WHILE loop — static, no need to rebuild)

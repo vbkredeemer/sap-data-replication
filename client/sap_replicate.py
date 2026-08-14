@@ -26,6 +26,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 from datetime import datetime, date, timedelta
@@ -68,8 +69,6 @@ log = logging.getLogger('sap_replicate')
 # ============================================================================
 # Helpers
 # ============================================================================
-
-import re
 
 _VALID_TABLE_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_/]{0,30}$')
 
@@ -220,7 +219,7 @@ class SchemaManager:
         """Read field definitions from SAP DD03L via Z_EXECUTE_SQL."""
         # Note: Z_EXECUTE_SQL doesn't support parameterized queries via RFC.
         # Sanitize table name to prevent injection.
-        safe_table = table.replace("'", "''").replace(";", "")
+        safe_table = _validate_table_name(table)
         query = (f"SELECT FIELDNAME, INTTYPE, INTLEN, DECIMALS, KEYFLAG "
                  f"FROM DD03L WHERE TABNAME = '{safe_table}' "
                  f"AND FIELDNAME NOT LIKE '.%' "
@@ -248,7 +247,7 @@ class SchemaManager:
     def get_table_indexes(self, table: str) -> list:
         """Read index definitions from SAP DD12L + DD17S via Z_EXECUTE_SQL."""
         # Sanitize table name
-        safe_table = table.replace("'", "''").replace(";", "")
+        safe_table = _validate_table_name(table)
         # Get index headers
         query = (f"SELECT INDEXNAME, DBINDEX, UNIQUEFLAG "
                  f"FROM DD12L WHERE TABNAME = '{safe_table}' "
@@ -291,7 +290,7 @@ class SchemaManager:
                 parts = row['ROWDATA'].split('|')
                 if len(parts) >= 2:
                     idx['fields'].append({
-                        'fieldname': parts[0].strip(),
+                        'fieldname': _validate_field_name(parts[0].strip()),
                         'order': 'DESC' if (parts[1].strip().upper() if len(parts) > 1 else 'A') == 'D' else 'ASC'
                     })
 
@@ -365,7 +364,7 @@ class SchemaManager:
         pk_cols = []
         for f in fields:
             mssql_type = self._sap_type_to_mssql(f['inttype'], f['length'], f['decimals'])
-            col_name = f['name']
+            col_name = _validate_field_name(f['name'])
             col_defs.append(f"  [{col_name}] {mssql_type}")
             if f['keyflag']:
                 pk_cols.append(f"[{col_name}]")
@@ -583,7 +582,7 @@ class CdcReplicator:
                 if len(values) >= len(col_names):
                     vals = values[:len(col_names)]
                 else:
-                    vals = values + [''] * (len(col_names) - len(values))
+                    vals = values + [None] * (len(col_names) - len(values))
 
                 if operation == 'I':
                     inserts.append(vals)
@@ -642,6 +641,9 @@ class CdcReplicator:
                     pass
                 else:
                     # Full row — extract key field values by column position
+                    # Pad key_vals to match col_names length to prevent IndexError
+                    if len(key_vals) < len(col_names):
+                        key_vals = key_vals + [''] * (len(col_names) - len(key_vals))
                     key_vals = [key_vals[col_names.index(k)] for k in key_fields]
                 where = ' AND '.join(f"[{k}] = ?" for k in key_fields)
                 self.sql.execute(f"DELETE FROM dbo.[{safe_table}] WHERE {where}", key_vals)
@@ -702,7 +704,11 @@ class CdcReplicator:
                 log.info(f"  {table}: applied {applied} rows (total: {total_rows})")
                 if next_seq > last_seq:
                     max_seq = next_seq - 1
+            prev_last_seq = last_seq
             last_seq = next_seq
+            if next_seq <= prev_last_seq and rows:
+                log.warning(f"  {table}: seq not advancing (next_seq={next_seq}, last_seq={prev_last_seq}) — stopping to prevent infinite loop")
+                break
             if not has_more:
                 break
             # Guard: if no rows but has_more is true, break to prevent infinite loop
@@ -809,7 +815,7 @@ class TimeframeReplicator:
                 if len(values) >= len(col_names):
                     vals = values[:len(col_names)]
                 else:
-                    vals = values + [''] * (len(col_names) - len(values))
+                    vals = values + [None] * (len(col_names) - len(values))
                 batch.append(vals)
 
             self.sql.executemany(insert_sql, batch)
@@ -883,7 +889,7 @@ class FullLoadReplicator:
                 if len(values) >= len(col_names):
                     vals = values[:len(col_names)]
                 else:
-                    vals = values + [''] * (len(col_names) - len(values))
+                    vals = values + [None] * (len(col_names) - len(values))
                 batch.append(vals)
 
             self.sql.executemany(insert_sql, batch)

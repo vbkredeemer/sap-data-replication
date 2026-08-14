@@ -192,7 +192,6 @@ FUNCTION Z_CDC_INIT.
         |SELECT COUNT(*) FROM SYS.TRIGGERS WHERE TRIGGER_NAME = '{ lv_trigger_full }'|
       ).
       lo_result->next( ).
-      DATA(lv_val) = lo_result->get_char( ).
       lv_trigger_count = lo_result->get_int( ).
       lo_result->close( ).
     CATCH cx_root.
@@ -235,6 +234,11 @@ FUNCTION Z_CDC_INIT.
   * Build new-row key expression
   LOOP AT lt_keyfields INTO lv_key.
     CONDENSE lv_key.
+    FIND REGEX '[^A-Za-z0-9_]' IN lv_key MATCH COUNT DATA(lv_bad_key).
+    IF lv_bad_key > 0.
+      ev_error = 'Invalid key field name (only A-Z, 0-9, underscore allowed): ' && lv_key.
+      RETURN.
+    ENDIF.
     IF lv_key_expr IS INITIAL.
       CONCATENATE ':new_row.' lv_key INTO lv_key_expr.
     ELSE.
@@ -245,6 +249,11 @@ FUNCTION Z_CDC_INIT.
   * Build old-row key expression (for DELETE trigger)
   LOOP AT lt_keyfields INTO lv_key.
     CONDENSE lv_key.
+    FIND REGEX '[^A-Za-z0-9_]' IN lv_key MATCH COUNT DATA(lv_bad_key2).
+    IF lv_bad_key2 > 0.
+      ev_error = 'Invalid key field name (only A-Z, 0-9, underscore allowed): ' && lv_key.
+      RETURN.
+    ENDIF.
     IF lv_key_expr_old IS INITIAL.
       CONCATENATE ':old_row.' lv_key INTO lv_key_expr_old.
     ELSE.

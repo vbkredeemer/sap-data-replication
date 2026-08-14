@@ -167,7 +167,8 @@ class SyncWorker(QThread):
 
         try:
             # Import replication logic
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            p = os.path.dirname(os.path.abspath(__file__))
+            if p not in sys.path: sys.path.insert(0, p)
             from sap_replicate import (
                 SapConnection, SqlServerConnection, StateManager,
                 CdcReplicator, TimeframeReplicator, FullLoadReplicator,
@@ -448,7 +449,8 @@ class SettingsTab(QWidget):
 
     def _test_sap(self):
         try:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            p = os.path.dirname(os.path.abspath(__file__))
+            if p not in sys.path: sys.path.insert(0, p)
             from pyrfc import Connection
             conn = Connection(
                 ashost=self.sap_host.text(),
@@ -690,6 +692,7 @@ class RunTab(QWidget):
         self.config_manager = config_manager
         self.tables_tab = tables_tab
         self.worker = None
+        self._scheduler_triggered = False
         self._build_ui()
 
     def _build_ui(self):
@@ -894,12 +897,13 @@ class RunTab(QWidget):
         self._set_buttons_enabled(True)
         self._log("INFO", f"=== Sync abgeschlossen: {success} erfolgreich, {fail} fehlgeschlagen ===")
         # Only show modal dialog for manual syncs, not scheduler-triggered ones
-        if not getattr(self.worker, '_scheduler_triggered', False):
+        if not getattr(self, '_scheduler_triggered', False):
             QMessageBox.information(self, "Fertig",
                 f"Sync abgeschlossen.\n{success} erfolgreich, {fail} fehlgeschlagen.")
         else:
             self.status_bar.showMessage(
                 f"Scheduler-Sync fertig: {success} OK, {fail} fehlgeschlagen", 10000)
+        self._scheduler_triggered = False
 
 
 # ============================================================================
@@ -1116,6 +1120,14 @@ class ScheduleTab(QWidget):
         }
 
     def _save_schedules(self):
+        ok, msg = self._save_schedules_silent()
+        if ok:
+            QMessageBox.information(self, "Gespeichert", msg)
+        else:
+            QMessageBox.critical(self, "Fehler", msg)
+
+    def _save_schedules_silent(self):
+        """Save schedules without showing a dialog. Returns (success, message)."""
         schedules = []
         for i in range(self.sched_table.rowCount()):
             s = self._read_sched_row(i)
@@ -1126,9 +1138,9 @@ class ScheduleTab(QWidget):
         config['schedules'] = schedules
         try:
             self.config_manager.set(config)
-            QMessageBox.information(self, "Gespeichert", f"{len(schedules)} Jobs gespeichert.")
+            return True, f"{len(schedules)} Jobs gespeichert."
         except Exception as e:
-            QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen: {e}")
+            return False, f"Speichern fehlgeschlagen: {e}"
 
     def _interval_to_seconds(self, interval: str) -> int:
         return {
@@ -1141,8 +1153,11 @@ class ScheduleTab(QWidget):
         }.get(interval, 86400)
 
     def _start_scheduler(self):
-        # Save first
-        self._save_schedules()
+        # Save first (silently — no dialog during scheduler start)
+        ok, msg = self._save_schedules_silent()
+        if not ok:
+            QMessageBox.critical(self, "Fehler", msg)
+            return
 
         config = self.config_manager.get()
         schedules = config.get('schedules', [])
@@ -1152,7 +1167,8 @@ class ScheduleTab(QWidget):
             return
 
         self.scheduler_running = True
-        self.last_run_time = {}
+        now = time.time()
+        self.last_run_time = {s['table']: now for s in active if s.get('table')}
 
         # Timer for checking schedules every 60 seconds
         self.scheduler_timer = QTimer()
@@ -1219,8 +1235,8 @@ class ScheduleTab(QWidget):
                         if window:
                             table_cfg = dict(table_cfg)
                             table_cfg['window'] = window
+                        self.run_tab._scheduler_triggered = True
                         self.run_tab._start_worker([table_cfg], "sync")
-                        self.run_tab.worker._scheduler_triggered = True
                     elif action == 'sync_schema':
                         self.run_tab._start_worker([table_cfg], "sync_schema")
                     elif action == 'init_only':
@@ -1270,8 +1286,6 @@ class ScheduleTab(QWidget):
             cli_args += ' --sync-schema-all'
         elif mode == 'init_only':
             cli_args += ' --init-only'
-        else:
-            cli_args += ' --window day'
 
         # Build .bat file with logging
         bat_content = f"""@echo off
@@ -1415,6 +1429,7 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Bereit")
+        self.run_tab.status_bar = self.status_bar
 
         central.setLayout(layout)
         self.setCentralWidget(central)

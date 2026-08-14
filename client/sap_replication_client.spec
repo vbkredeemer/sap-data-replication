@@ -16,6 +16,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('config.example.json', '.'),
+        ('sap_replicate.py', '.'),
     ],
     hiddenimports=[
         'pyrfc',
