@@ -71,9 +71,10 @@ FUNCTION Z_EXPORT_TABLE.
     RETURN.
   ENDIF.
 
-  CONDENSE iv_table.
-  IF iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
-    ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
+  DATA(lv_check_table) = iv_table.
+  CONDENSE lv_check_table.
+  IF lv_check_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
+    ev_error = |Invalid table name (only A-Z, 0-9, underscore, slash allowed): { lv_check_table }|.
     RETURN.
   ENDIF.
 
@@ -89,9 +90,10 @@ FUNCTION Z_EXPORT_TABLE.
   "---------------------------------------------------------------------
   " Validate date field name if provided
   IF iv_date_field IS NOT INITIAL.
-    CONDENSE iv_date_field.
-    IF iv_date_field CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
-      ev_error = 'Invalid date field name: ' && iv_date_field.
+    DATA(lv_check_field) = iv_date_field.
+    CONDENSE lv_check_field.
+    IF lv_check_field CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
+      ev_error = |Invalid date field name: { lv_check_field }|.
       RETURN.
     ENDIF.
   ENDIF.
@@ -184,8 +186,8 @@ FUNCTION Z_EXPORT_TABLE.
   "---------------------------------------------------------------------*
   LOOP AT lt_export_fields INTO lv_fieldname.
     CONDENSE lv_fieldname.
-    IF lv_fieldname CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
-      ev_error = 'Invalid field name (only A-Z, 0-9, underscore allowed): ' && lv_fieldname.
+    IF lv_fieldname CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
+      ev_error = |Invalid field name (only A-Z, 0-9, underscore, slash allowed): { lv_fieldname }|.
       RETURN.
     ENDIF.
   ENDLOOP.

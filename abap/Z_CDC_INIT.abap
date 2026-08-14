@@ -48,10 +48,11 @@ FUNCTION Z_CDC_INIT.
   CLEAR: ev_error, ev_log_table, ev_trigger_exists, ev_gap_detected,
          ev_last_log_seq, ev_last_log_time.
 
-  " Validate table name — only alphanumeric and underscore allowed
-  CONDENSE iv_table.
-  IF iv_table IS INITIAL OR iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
-    ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
+  " Validate table name — only alphanumeric, underscore and slash (for namespaces like /BIC/) allowed
+  DATA(lv_check_table) = iv_table.
+  CONDENSE lv_check_table.
+  IF lv_check_table IS INITIAL OR lv_check_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
+    ev_error = |Invalid table name (only A-Z, 0-9, underscore, slash allowed): { lv_check_table }|.
     RETURN.
   ENDIF.
 
@@ -234,8 +235,8 @@ FUNCTION Z_CDC_INIT.
   LOOP AT lt_keyfields INTO lv_key.
     CONDENSE lv_key.
     " lv_key already CONDENSE'd above — CN check is safe
-    IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
-      ev_error = 'Invalid key field name (only A-Z, 0-9, underscore allowed): ' && lv_key.
+    IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
+      ev_error = |Invalid key field name (only A-Z, 0-9, underscore, slash allowed): { lv_key }|.
       RETURN.
     ENDIF.
     IF lv_key_expr IS INITIAL.
@@ -249,8 +250,8 @@ FUNCTION Z_CDC_INIT.
   LOOP AT lt_keyfields INTO lv_key.
     CONDENSE lv_key.
     " lv_key already CONDENSE'd above — CN check is safe
-    IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
-      ev_error = 'Invalid key field name (only A-Z, 0-9, underscore allowed): ' && lv_key.
+    IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
+      ev_error = |Invalid key field name (only A-Z, 0-9, underscore, slash allowed): { lv_key }|.
       RETURN.
     ENDIF.
     IF lv_key_expr_old IS INITIAL.
