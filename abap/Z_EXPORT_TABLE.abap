@@ -119,7 +119,7 @@ FUNCTION Z_EXPORT_TABLE.
 
   DATA: lv_date_str TYPE c LENGTH 8,
         lv_time_str TYPE c LENGTH 6.
-  WRITE lv_date TO lv_date_str YYMMDD.
+  WRITE lv_date TO lv_date_str YYYYMMDD.
   WRITE lv_time TO lv_time_str HHMMSS.
 
   CONCATENATE iv_table '_' lv_date_str '_' lv_time_str '.csv'
@@ -212,13 +212,31 @@ FUNCTION Z_EXPORT_TABLE.
 
   ASSIGN lt_dynamic->* TO <ft_dynamic>.
 
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   * Execute SELECT in blocks of 50000 rows for memory efficiency
-  *---------------------------------------------------------------------
+  * Uses keyset paging: after each block, remember the last key value
+  * and fetch the next block with WHERE key > last_key
+  *---------------------------------------------------------------------*
   DATA: lv_block_size TYPE i VALUE 50000,
-        lv_skip        TYPE i VALUE 0,
         lv_total       TYPE i VALUE 0,
         lv_done        TYPE abap_bool VALUE abap_false.
+
+  * Get primary key fields for keyset paging
+  DATA: lt_pk_fields TYPE TABLE OF dfies,
+        ls_pk_field  TYPE dfies,
+        lv_pk_where  TYPE string,
+        lv_last_key  TYPE string,
+        lv_first_block TYPE abap_bool VALUE abap_true.
+
+  CALL FUNCTION 'DDIF_NAMETAB_GET'
+    EXPORTING
+      tabname   = iv_table
+    TABLES
+      dfies_tab = lt_pk_fields
+    EXCEPTIONS
+      OTHERS    = 1.
+
+  DELETE lt_pk_fields WHERE keyflag <> 'X'.
 
   * Build field list for SELECT (same as export fields, comma-separated)
   DATA: lv_select_fields TYPE string.
@@ -230,9 +248,35 @@ FUNCTION Z_EXPORT_TABLE.
 
   WHILE lv_done = abap_false.
 
+    * Build keyset WHERE clause: combine date filter + key paging
+    CLEAR lv_pk_where.
+    IF lv_first_block = abap_false AND lv_last_key IS NOT INITIAL.
+      * Keyset: WHERE key > last_key
+      DATA: lv_key_idx TYPE i VALUE 1.
+      LOOP AT lt_pk_fields INTO ls_pk_field.
+        IF lv_key_idx = 1.
+          CONCATENATE ls_pk_field-fieldname ' > ''' lv_last_key ''''
+            INTO lv_pk_where.
+        ELSE.
+          CONCATENATE lv_pk_where ' AND ' ls_pk_field-fieldname ' > ''' lv_last_key ''''
+            INTO lv_pk_where SEPARATED BY space.
+        ENDIF.
+        lv_key_idx = lv_key_idx + 1.
+      ENDLOOP.
+      * Combine with date filter
+      IF lv_where IS NOT INITIAL.
+        CONCATENATE lv_where ' AND ' lv_pk_where
+          INTO lv_pk_where SEPARATED BY space.
+      ELSE.
+        lv_pk_where = lv_pk_where.
+      ENDIF.
+    ELSE.
+      lv_pk_where = lv_where.
+    ENDIF.
+
     * Build and execute dynamic SELECT
     TRY.
-        IF lv_where IS NOT INITIAL.
+        IF lv_pk_where IS NOT INITIAL.
           IF iv_max_rows > 0.
             DATA: lv_max_fetch TYPE i.
             lv_max_fetch = iv_max_rows - lv_total.
@@ -245,11 +289,11 @@ FUNCTION Z_EXPORT_TABLE.
             ENDIF.
 
             SELECT (lv_select_fields) FROM (iv_table)
-              WHERE (lv_where)
+              WHERE (lv_pk_where)
               INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS.
           ELSE.
             SELECT (lv_select_fields) FROM (iv_table)
-              WHERE (lv_where)
+              WHERE (lv_pk_where)
               INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS.
           ENDIF.
         ELSE.
@@ -438,6 +482,25 @@ FUNCTION Z_EXPORT_TABLE.
     IF lines( <ft_dynamic> ) < lv_block_size.
       lv_done = abap_true.
     ENDIF.
+
+    * Remember last key for keyset paging (first PK field)
+    IF lv_done = abap_false AND lines( lt_pk_fields ) > 0.
+      READ TABLE lt_pk_fields INTO ls_pk_field INDEX 1.
+      IF sy-subrc = 0.
+        * Get last row's key value
+        DESCRIBE TABLE <ft_dynamic> LINES DATA(lv_line_count).
+        READ TABLE <ft_dynamic> ASSIGNING <fs_dynamic> INDEX lv_line_count.
+        IF sy-subrc = 0.
+          ASSIGN COMPONENT ls_pk_field-fieldname OF STRUCTURE <fs_dynamic> TO <ff_field>.
+          IF sy-subrc = 0.
+            lv_last_key = |{ <ff_field> }|.
+            CONDENSE lv_last_key.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    lv_first_block = abap_false.
 
     * Check max rows
     IF iv_max_rows > 0 AND lv_total >= iv_max_rows.

@@ -9,6 +9,7 @@
 * IMPORTING:
 *   IV_TABLE       TYPE TABNAME    - SAP-Quelltabelle (z.B. 'MARA')
 *   IV_KEYFIELDS   TYPE STRING     - Komma-separierte Keys (z.B. 'MATNR')
+*   IV_GAP_THRESHOLD_HOURS TYPE I  - Lückenschwelle in Stunden (Default 24)
 *
 * EXPORTING:
 *   EV_LOG_TABLE   TYPE TABNAME    - Name der Log-Tabelle
@@ -25,6 +26,7 @@ FUNCTION Z_CDC_INIT.
 *"  IMPORTING
 *"     VALUE(IV_TABLE) TYPE  TABNAME
 *"     VALUE(IV_KEYFIELDS) TYPE  STRING
+*"     VALUE(IV_GAP_THRESHOLD_HOURS) TYPE  I DEFAULT 24
 *"  EXPORTING
 *"     VALUE(EV_LOG_TABLE) TYPE  TABNAME
 *"     VALUE(EV_TRIGGER_EXISTS) TYPE  CHAR1
@@ -47,7 +49,7 @@ FUNCTION Z_CDC_INIT.
         lv_age_hours TYPE i.
 
   CLEAR: ev_error, ev_log_table, ev_trigger_exists, ev_gap_detected,
-         ev_last_log_seq, ev_last_time.
+         ev_last_log_seq, ev_last_log_time.
 
   *---------------------------------------------------------------------
   * Validate inputs
@@ -62,12 +64,38 @@ FUNCTION Z_CDC_INIT.
     RETURN.
   ENDIF.
 
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   * Build names
-  *---------------------------------------------------------------------
-  CONCATENATE 'Z_' iv_table '_CDC_LOG' INTO lv_log_table.
-  CONCATENATE 'Z_' iv_table '_CDC_TRG' INTO lv_trigger_name.
-  CONCATENATE 'Z_' iv_table '_CDC_SEQ' INTO lv_seq_name.
+  * HANA trigger names max 32 chars — hash if too long
+  *---------------------------------------------------------------------*
+  DATA: lv_tab_len TYPE i,
+        lv_hash    TYPE i.
+
+  lv_tab_len = strlen( iv_table ).
+
+  IF lv_tab_len > 20.
+    * Table name too long — use hash to keep trigger name < 32 chars
+    * Z_ + hash(6) + _CDC_TRG_INS = 3+6+13 = 22 chars (safe)
+    CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
+      EXPORTING
+        data = iv_table
+      IMPORTING
+        hashstring = DATA(lv_hash_str)
+      EXCEPTIONS
+        OTHERS = 1.
+    IF sy-subrc = 0 AND strlen( lv_hash_str ) >= 6.
+      DATA(lv_short) = lv_hash_str(6).
+    ELSE.
+      lv_short = iv_table(6).
+    ENDIF.
+    CONCATENATE 'Z_' lv_short '_CDC_LOG' INTO lv_log_table.
+    CONCATENATE 'Z_' lv_short '_CDC_TRG' INTO lv_trigger_name.
+    CONCATENATE 'Z_' lv_short '_CDC_SEQ' INTO lv_seq_name.
+  ELSE.
+    CONCATENATE 'Z_' iv_table '_CDC_LOG' INTO lv_log_table.
+    CONCATENATE 'Z_' iv_table '_CDC_TRG' INTO lv_trigger_name.
+    CONCATENATE 'Z_' iv_table '_CDC_SEQ' INTO lv_seq_name.
+  ENDIF.
 
   ev_log_table = lv_log_table.
 
@@ -116,9 +144,10 @@ FUNCTION Z_CDC_INIT.
     ENDTRY.
   ENDIF.
 
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   * Check if last log entry is old (gap detection)
-  *---------------------------------------------------------------------
+  * Only flag gap if trigger is MISSING and log has entries
+  *---------------------------------------------------------------------*
   TRY.
       SELECT MAX( seq ) FROM (lv_log_table) INTO lv_last_seq.
       IF lv_last_seq > 0.
@@ -127,14 +156,23 @@ FUNCTION Z_CDC_INIT.
         ev_last_log_seq = lv_last_seq.
         ev_last_log_time = lv_last_time.
 
-        * Check age — if last entry is older than 6 hours, likely a gap
-        DATA(lv_now) = utclong_current( ).
-        DATA(lv_diff) = utclong_diff_seconds( val2 = lv_now
-                                              val1 = lv_last_time ).
-        lv_age_hours = lv_diff / 3600.
-        IF lv_age_hours > 6.
-          ev_gap_detected = 'X'.
-        ENDIF.
+        * Calculate age in hours using cl_abap_tstmp (7.00+ compatible)
+        DATA: lv_now_tstmp TYPE timestampl.
+        GET TIME STAMP FIELD lv_now_tstmp.
+        TRY.
+            DATA(lv_diff_secs) = cl_abap_tstmp=>subtractsecs(
+              tstmp1 = lv_now_tstmp
+              tstmp2 = lv_last_time ).
+            lv_age_hours = lv_diff_secs / 3600.
+          CATCH cx_root.
+            * Cannot calculate — don't flag gap
+            lv_age_hours = 0.
+        ENDTRY.
+
+        * Gap is only suspicious if:
+        *   1. The trigger is missing (checked below)
+        *   2. The last log entry is older than threshold
+        * We store the age but only set EV_GAP_DETECTED after checking trigger
       ENDIF.
     CATCH cx_root.
       * Log table empty or error — no gap
@@ -161,8 +199,19 @@ FUNCTION Z_CDC_INIT.
 
   IF lv_trigger_count > 0.
     ev_trigger_exists = 'X'.
-    * Trigger already exists — nothing to do
+    * Trigger exists — no gap even if log is old
     RETURN.
+  ENDIF.
+
+  *---------------------------------------------------------------------*
+  * Trigger does NOT exist — check if there's a gap
+  * A gap is only detected if:
+  *   - Log table has entries (lv_last_seq > 0)
+  *   - AND last entry is older than threshold (default 24h)
+  *   - AND trigger is missing (we're here because it's missing)
+  *---------------------------------------------------------------------*
+  IF lv_last_seq > 0 AND lv_age_hours > iv_gap_threshold_hours.
+    ev_gap_detected = 'X'.
   ENDIF.
 
   *---------------------------------------------------------------------

@@ -42,7 +42,6 @@ FUNCTION Z_CDC_READ.
 
   DATA: lv_log_table TYPE tabname,
         lv_sql TYPE string,
-        lt_keyfields TYPE TABLE OF string,
         ls_field_cat TYPE ZSQL_FIELD,
         ls_data TYPE ZSQL_ROW,
         lv_rowdata TYPE string,
@@ -51,14 +50,33 @@ FUNCTION Z_CDC_READ.
   CLEAR: ev_error, ev_row_count, ev_next_seq, ev_has_more.
   CLEAR: et_fields[], et_data[].
 
-  *---------------------------------------------------------------------
-  * Build log table name
-  *---------------------------------------------------------------------
-  CONCATENATE 'Z_' iv_table '_CDC_LOG' INTO lv_log_table.
+  *---------------------------------------------------------------------*
+  * Build log table name (must match Z_CDC_INIT logic)
+  *---------------------------------------------------------------------*
+  DATA: lv_tab_len TYPE i.
+  lv_tab_len = strlen( iv_table ).
 
-  *---------------------------------------------------------------------
+  IF lv_tab_len > 20.
+    CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
+      EXPORTING
+        data = iv_table
+      IMPORTING
+        hashstring = DATA(lv_hash_str)
+      EXCEPTIONS
+        OTHERS = 1.
+    IF sy-subrc = 0 AND strlen( lv_hash_str ) >= 6.
+      DATA(lv_short) = lv_hash_str(6).
+    ELSE.
+      lv_short = iv_table(6).
+    ENDIF.
+    CONCATENATE 'Z_' lv_short '_CDC_LOG' INTO lv_log_table.
+  ELSE.
+    CONCATENATE 'Z_' iv_table '_CDC_LOG' INTO lv_log_table.
+  ENDIF.
+
+  *---------------------------------------------------------------------*
   * Validate
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   IF iv_table IS INITIAL.
     ev_error = 'IV_TABLE is empty'.
     RETURN.
@@ -84,11 +102,31 @@ FUNCTION Z_CDC_READ.
 
   lt_components = lo_struct_descr->get_components( ).
 
-  *---------------------------------------------------------------------
-  * Build ET_FIELDS metadata
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
+  * Build ET_FIELDS metadata + get key field names ONCE (not in loop)
+  *---------------------------------------------------------------------*
   DATA: lv_colpos TYPE i.
   lv_colpos = 1.
+
+  * Get DDIC key fields ONCE before the loop
+  DATA: lt_ddic_keyfields TYPE TABLE OF dfies,
+        ls_ddic_key       TYPE dfies.
+
+  CALL FUNCTION 'DDIF_NAMETAB_GET'
+    EXPORTING
+      tabname   = iv_table
+    TABLES
+      dfies_tab = lt_ddic_keyfields
+    EXCEPTIONS
+      OTHERS    = 1.
+
+  IF sy-subrc <> 0.
+    ev_error = 'Cannot get nametab for ' && iv_table.
+    RETURN.
+  ENDIF.
+
+  * Filter to key fields only
+  DELETE lt_ddic_keyfields WHERE keyflag <> 'X'.
 
   LOOP AT lt_components INTO ls_component.
     CLEAR ls_field_cat.
@@ -215,25 +253,8 @@ FUNCTION Z_CDC_READ.
 
       SPLIT lv_keyvalues AT '|' INTO TABLE lt_keys.
 
-      LOOP AT lt_keyfields INTO DATA(lv_kf).
-        " Not used — we use field names from DDIC
-      ENDLOOP.
-
       * Build WHERE from key fields and key values
-      * Get key field names from DDIC
-      DATA: lt_ddic_keyfields TYPE TABLE OF dfies,
-            ls_ddic_key       TYPE dfies.
-
-      CALL FUNCTION 'DDIF_NAMETAB_GET'
-        EXPORTING
-          tabname   = iv_table
-        TABLES
-          dfies_tab = lt_ddic_keyfields
-        EXCEPTIONS
-          OTHERS    = 1.
-
-      * Filter to key fields only
-      DELETE lt_ddic_keyfields WHERE keyflag <> 'X'.
+      * Key field names already retrieved from DDIC above (lt_ddic_keyfields)
 
       lv_key_idx = 0.
       LOOP AT lt_ddic_keyfields INTO ls_ddic_key.
@@ -336,11 +357,16 @@ FUNCTION Z_CDC_READ.
     CATCH cx_root.
   ENDTRY.
 
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   * Set return values
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   ev_row_count = lv_count.
-  ev_next_seq = lv_max_seq + 1.
+  IF lv_count = 0.
+    * No entries found — return the same SEQ the client sent
+    ev_next_seq = iv_from_seq.
+  ELSE.
+    ev_next_seq = lv_max_seq + 1.
+  ENDIF.
 
   * Check if there are more entries
   DATA: lv_remaining TYPE i.

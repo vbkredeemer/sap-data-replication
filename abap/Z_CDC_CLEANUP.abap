@@ -46,12 +46,33 @@ FUNCTION Z_CDC_CLEANUP.
     RETURN.
   ENDIF.
 
-  *---------------------------------------------------------------------
-  * Build names
-  *---------------------------------------------------------------------
-  CONCATENATE 'Z_' iv_table '_CDC_LOG' INTO lv_log_table.
-  CONCATENATE 'Z_' iv_table '_CDC_TRG' INTO lv_trigger_name.
-  CONCATENATE 'Z_' iv_table '_CDC_SEQ' INTO lv_seq_name.
+  *---------------------------------------------------------------------*
+  * Build names (must match Z_CDC_INIT logic)
+  *---------------------------------------------------------------------*
+  DATA: lv_tab_len TYPE i.
+  lv_tab_len = strlen( iv_table ).
+
+  IF lv_tab_len > 20.
+    CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
+      EXPORTING
+        data = iv_table
+      IMPORTING
+        hashstring = DATA(lv_hash_str)
+      EXCEPTIONS
+        OTHERS = 1.
+    IF sy-subrc = 0 AND strlen( lv_hash_str ) >= 6.
+      DATA(lv_short) = lv_hash_str(6).
+    ELSE.
+      lv_short = iv_table(6).
+    ENDIF.
+    CONCATENATE 'Z_' lv_short '_CDC_LOG' INTO lv_log_table.
+    CONCATENATE 'Z_' lv_short '_CDC_TRG' INTO lv_trigger_name.
+    CONCATENATE 'Z_' lv_short '_CDC_SEQ' INTO lv_seq_name.
+  ELSE.
+    CONCATENATE 'Z_' iv_table '_CDC_LOG' INTO lv_log_table.
+    CONCATENATE 'Z_' iv_table '_CDC_TRG' INTO lv_trigger_name.
+    CONCATENATE 'Z_' iv_table '_CDC_SEQ' INTO lv_seq_name.
+  ENDIF.
 
   *---------------------------------------------------------------------
   * Get SQL connection
@@ -75,8 +96,8 @@ FUNCTION Z_CDC_CLEANUP.
                 INTO lv_sql.
 
     TRY.
-        DATA(lo_result) = lo_sql_stmt->execute_ddl( lv_sql ).
-        * ADBC execute_ddl returns affected rows for DML
+        DATA(lo_result) = lo_sql_stmt->execute_update( lv_sql ).
+        * execute_update returns affected rows for DML
         ev_deleted = lo_result.
       CATCH cx_root INTO lo_cx_conn.
         ev_error = 'Cannot delete log entries: ' && lo_cx_conn->get_text( ).

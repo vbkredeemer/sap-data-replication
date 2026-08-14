@@ -4,9 +4,11 @@ SAP Data Replication Client
 ============================
 Repliziert SAP-Tabellen in eine Zieldatenbank (Microsoft SQL Server).
 
-Zwei Modi:
+Vier Modi:
   1. CDC-Modus (trigger-basiert): Z_CDC_INIT → Z_CDC_READ → Z_CDC_CLEANUP
   2. Zeitfenster-Modus (trigger-frei): DELETE Zeitraum → Z_READ_TABLE → INSERT
+  3. Full-Load-Modus: TRUNCATE → Z_READ_TABLE → INSERT
+  4. Flatfile-Modus: Z_EXPORT_TABLE → SCP/SMB → BULK INSERT
 
 Voraussetzungen:
   - pyrfc (pip install pyrfc) + SAP NWRFC SDK (libsapnwrfc.dll/.so)
@@ -24,8 +26,9 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -150,33 +153,17 @@ class SqlServerConnection:
 class SchemaManager:
     """Reads table/index metadata from SAP and creates matching tables in MSSQL."""
 
-    # SAP DDIC type → MSSQL type mapping
-    SAP_TO_MSSQL = {
-        'CHAR': 'NVARCHAR',
-        'STRING': 'NVARCHAR(MAX)',
-        'INT4': 'INT',
-        'INT2': 'SMALLINT',
-        'INT1': 'TINYINT',
-        'NUMC': 'NVARCHAR',  # NUmber as CHAR
-        'PACK': 'DECIMAL',
-        'FLTP': 'FLOAT',
-        'DATS': 'DATE',
-        'TIMS': 'TIME(0)',
-        'RAW': 'VARBINARY',
-        'LRAW': 'VARBINARY(MAX)',
-        'CUKY': 'NVARCHAR',
-        'UNIT': 'NVARCHAR',
-        'DATS_RAW': 'DATE',
-    }
-
     def __init__(self, sap: SapConnection, sql: SqlServerConnection):
         self.sap = sap
         self.sql = sql
 
     def get_table_fields(self, table: str) -> list:
         """Read field definitions from SAP DD03L via Z_EXECUTE_SQL."""
+        # Note: Z_EXECUTE_SQL doesn't support parameterized queries via RFC.
+        # Sanitize table name to prevent injection.
+        safe_table = table.replace("'", "''").replace(";", "")
         query = (f"SELECT FIELDNAME, INTTYPE, INTLEN, DECIMALS, KEYFLAG "
-                 f"FROM DD03L WHERE TABNAME = '{table}' "
+                 f"FROM DD03L WHERE TABNAME = '{safe_table}' "
                  f"AND FIELDNAME NOT LIKE '.%' "
                  f"ORDER BY POSITION")
         result = self.sap.call('Z_EXECUTE_SQL',
@@ -201,9 +188,11 @@ class SchemaManager:
 
     def get_table_indexes(self, table: str) -> list:
         """Read index definitions from SAP DD12L + DD17S via Z_EXECUTE_SQL."""
+        # Sanitize table name
+        safe_table = table.replace("'", "''").replace(";", "")
         # Get index headers
         query = (f"SELECT INDEXNAME, DBINDEX, UNIQUEFLAG "
-                 f"FROM DD12L WHERE TABNAME = '{table}' "
+                 f"FROM DD12L WHERE TABNAME = '{safe_table}' "
                  f"AND AS4LOCAL = 'A' "
                  f"ORDER BY POSITION")
         result = self.sap.call('Z_EXECUTE_SQL',
@@ -229,9 +218,10 @@ class SchemaManager:
 
         # Get index fields for each index
         for idx in indexes:
+            safe_idx_name = idx['name'].replace("'", "''").replace(";", "")
             query = (f"SELECT FIELDNAME, ASCDESC "
-                     f"FROM DD17S WHERE TABNAME = '{table}' "
-                     f"AND INDEXNAME = '{idx['name']}' "
+                     f"FROM DD17S WHERE TABNAME = '{safe_table}' "
+                     f"AND INDEXNAME = '{safe_idx_name}' "
                      f"ORDER BY POSITION")
             result = self.sap.call('Z_EXECUTE_SQL',
                                    IV_SQL=query,
@@ -498,6 +488,12 @@ class CdcReplicator:
         cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.{table}")
         col_names = [desc[0] for desc in cursor.description]
 
+        # Validate that all key_fields exist in the target table columns
+        missing_keys = [k for k in key_fields if k not in col_names]
+        if missing_keys:
+            log.error(f"  Key fields not found in target table: {missing_keys}")
+            return 0
+
         inserts = []
         updates = []
         deletes = []
@@ -508,10 +504,9 @@ class CdcReplicator:
             values = parts[1:]
 
             if operation == 'D':
-                # DELETE
+                # DELETE — batch later
                 key_vals = values[:len(key_fields)]
-                where = ' AND '.join(f"{k} = ?" for k in key_fields)
-                self.sql.execute(f"DELETE FROM dbo.{table} WHERE {where}", key_vals)
+                deletes.append(key_vals)
             elif operation in ('I', 'U'):
                 # INSERT or UPDATE (UPSERT via MERGE)
                 if len(values) >= len(col_names):
@@ -520,21 +515,41 @@ class CdcReplicator:
                     vals = values + [''] * (len(col_names) - len(values))
 
                 if operation == 'I':
-                    placeholders = ','.join(['?'] * len(col_names))
-                    col_list = ','.join(col_names)
-                    self.sql.execute(
-                        f"INSERT INTO dbo.{table} ({col_list}) VALUES ({placeholders})",
-                        vals
-                    )
+                    inserts.append(vals)
                 else:  # U
-                    set_clause = ','.join(f"{c} = ?" for c in col_names if c not in key_fields)
-                    where = ' AND '.join(f"{k} = ?" for k in key_fields)
-                    update_vals = [v for c, v in zip(col_names, vals) if c not in key_fields]
-                    update_vals += [vals[col_names.index(k)] for k in key_fields]
-                    self.sql.execute(
-                        f"UPDATE dbo.{table} SET {set_clause} WHERE {where}",
-                        update_vals
-                    )
+                    updates.append(vals)
+
+        # Batch INSERTs
+        if inserts:
+            placeholders = ','.join(['?'] * len(col_names))
+            col_list = ','.join(col_names)
+            insert_sql = f"INSERT INTO dbo.{table} ({col_list}) VALUES ({placeholders})"
+            self.sql.executemany(insert_sql, inserts)
+            self.sql.commit()
+
+        # Batch UPDATEs (executemany with per-row WHERE)
+        if updates:
+            col_list = ','.join(col_names)
+            for vals in updates:
+                set_clause = ','.join(f"{c} = ?" for c in col_names if c not in key_fields)
+                where = ' AND '.join(f"{k} = ?" for k in key_fields)
+                if not set_clause:
+                    log.warning(f"  UPDATE skipped — no non-key columns to set")
+                    continue
+                update_vals = [v for c, v in zip(col_names, vals) if c not in key_fields]
+                update_vals += [vals[col_names.index(k)] for k in key_fields]
+                self.sql.execute(
+                    f"UPDATE dbo.{table} SET {set_clause} WHERE {where}",
+                    update_vals
+                )
+            self.sql.commit()
+
+        # Batch DELETEs
+        if deletes:
+            for key_vals in deletes:
+                where = ' AND '.join(f"{k} = ?" for k in key_fields)
+                self.sql.execute(f"DELETE FROM dbo.{table} WHERE {where}", key_vals)
+            self.sql.commit()
 
         self.sql.commit()
         return len(rows)
@@ -633,14 +648,12 @@ class TimeframeReplicator:
         
         if window == 'day':
             # Current: today, Previous: yesterday
-            from datetime import timedelta
             prev = today - timedelta(days=1)
             return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
             
         elif window == 'week':
             # Week = Monday to Sunday
             # Current week start (Monday)
-            from datetime import timedelta
             current_week_start = today - timedelta(days=today.weekday())
             # Previous week start
             prev_week_start = current_week_start - timedelta(days=7)
@@ -665,7 +678,6 @@ class TimeframeReplicator:
             
         else:
             # Default: today + yesterday
-            from datetime import timedelta
             prev = today - timedelta(days=1)
             return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
 
@@ -865,12 +877,14 @@ class FlatfileReplicator:
         """
         today = date.today()
         
+        if window == 'all':
+            # Full table — no date filter
+            return '', ''
+        
         if window == 'day':
-            from datetime import timedelta
             prev = today - timedelta(days=1)
             return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
         elif window == 'week':
-            from datetime import timedelta
             current_week_start = today - timedelta(days=today.weekday())
             prev_week_start = current_week_start - timedelta(days=7)
             return prev_week_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
@@ -884,13 +898,11 @@ class FlatfileReplicator:
             prev_year_start = today.replace(year=today.year - 1, month=1, day=1)
             return prev_year_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
         else:
-            from datetime import timedelta
             prev = today - timedelta(days=1)
             return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
 
     def _download_file(self, remote_path: str, local_path: str) -> bool:
         """Download file from SAP server — supports SCP, SMB, and local methods."""
-        import shutil
 
         if self.transfer_method == 'smb':
             return self._download_smb(remote_path, local_path)
@@ -936,8 +948,6 @@ class FlatfileReplicator:
         The smb_share config maps this to a UNC path (e.g. \\sap-server\sap\tmp\).
         We extract the filename and build the UNC path.
         """
-        import shutil
-        import os
 
         if not self.smb_share:
             log.error("  No SMB share configured — cannot download via SMB")
@@ -971,8 +981,6 @@ class FlatfileReplicator:
         remote_path is directly accessible from the Python client.
         Just copy it to the temp location.
         """
-        import shutil
-        import os
 
         if not os.path.exists(remote_path):
             log.error(f"  File not found locally: {remote_path}")
@@ -992,7 +1000,6 @@ class FlatfileReplicator:
                          date_field: str = None, date_from: str = None,
                          date_to: str = None) -> int:
         """Bulk insert CSV into SQL Server using BULK INSERT."""
-        import os
         import csv
 
         # Read CSV header to get column names
@@ -1020,9 +1027,8 @@ class FlatfileReplicator:
             self.sql.commit()
 
         # Use BULK INSERT via pyodbc (fastest method)
-        # Need to share the file via a network path or local path
-        # For local execution: use BULK INSERT directly
-        csv_abs = os.path.abspath(csv_path).replace('\\', '\\\\')
+        # Pass the absolute path directly — BULK INSERT accepts single-quoted paths
+        csv_abs = os.path.abspath(csv_path)
 
         bulk_sql = f"""
             BULK INSERT dbo.{target_table}
@@ -1162,7 +1168,6 @@ class FlatfileReplicator:
 
         # Step 2: Download file from SAP server
         import tempfile
-        import os
         local_file = os.path.join(tempfile.gettempdir(), os.path.basename(remote_file))
 
         if not self._download_file(remote_file, local_file):
@@ -1243,15 +1248,17 @@ def run_table(table_cfg: dict, sap: SapConnection, sql: SqlServerConnection,
             replicator = FlatfileReplicator(sap, sql, ssh_config,
                                              transfer_method=transfer_method,
                                              smb_share=smb_share)
+            # Use date_field from config, fall back to delta_field
+            effective_date_field = date_field or delta_field
             return replicator.sync_table(
                 table=table,
                 target_table=target_table,
-                date_field=date_field if mode_override != 'flatfile' else delta_field,
+                date_field=effective_date_field,
                 window=window,
                 fields=fields,
                 max_rows=max_rows,
                 file_path=file_path,
-                replace_mode=replace_mode if not window else 'replace_window' if date_field else 'replace_all'
+                replace_mode=replace_mode
             )
 
         else:
