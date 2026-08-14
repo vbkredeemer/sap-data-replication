@@ -47,6 +47,7 @@ FUNCTION Z_CDC_CLEANUP.
   ENDIF.
 
   " Validate table name — only alphanumeric and underscore allowed
+  CONDENSE iv_table.
   IF iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
     ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
     RETURN.

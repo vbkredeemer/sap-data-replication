@@ -58,6 +58,7 @@ FUNCTION Z_CDC_READ.
     RETURN.
   ENDIF.
 
+  CONDENSE iv_table.
   IF iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
     ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
     RETURN.

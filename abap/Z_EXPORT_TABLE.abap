@@ -71,6 +71,7 @@ FUNCTION Z_EXPORT_TABLE.
     RETURN.
   ENDIF.
 
+  CONDENSE iv_table.
   IF iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
     ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
     RETURN.
@@ -88,6 +89,7 @@ FUNCTION Z_EXPORT_TABLE.
   "---------------------------------------------------------------------
   " Validate date field name if provided
   IF iv_date_field IS NOT INITIAL.
+    CONDENSE iv_date_field.
     IF iv_date_field CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_'.
       ev_error = 'Invalid date field name: ' && iv_date_field.
       RETURN.
