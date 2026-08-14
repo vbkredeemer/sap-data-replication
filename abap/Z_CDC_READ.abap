@@ -45,7 +45,8 @@ FUNCTION Z_CDC_READ.
         ls_field_cat TYPE ZSQL_FIELD,
         ls_data TYPE ZSQL_ROW,
         lv_rowdata TYPE string,
-        lv_field_value TYPE string.
+        lv_field_value TYPE string,
+        lv_check_table TYPE string.
 
   CLEAR: ev_error, ev_row_count, ev_next_seq, ev_has_more.
   CLEAR: et_fields[], et_data[].
@@ -58,10 +59,14 @@ FUNCTION Z_CDC_READ.
     RETURN.
   ENDIF.
 
-  DATA(lv_check_table) = iv_table.
-  CONDENSE lv_check_table.
-  IF lv_check_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
-    ev_error = |Invalid table name (only A-Z, 0-9, underscore, slash allowed): { lv_check_table }|.
+  "---------------------------------------------------------------------*
+  " Validate table name — only A-Z, 0-9, underscore and slash allowed
+  "---------------------------------------------------------------------*
+  lv_check_table = iv_table.
+  CONDENSE lv_check_table NO-GAPS.
+  TRANSLATE lv_check_table TO UPPER CASE.
+  IF NOT lv_check_table CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
+    ev_error = |Invalid table name (only A-Z, 0-9, _, / allowed): { lv_check_table }|.
     RETURN.
   ENDIF.
 

@@ -59,7 +59,9 @@ FUNCTION Z_EXPORT_TABLE.
         lv_row          TYPE string,
         lv_char_val     TYPE string,
         lv_count        TYPE i,
-        lv_size         TYPE i.
+        lv_size         TYPE i,
+        lv_check_table  TYPE string,
+        lv_check_field  TYPE string.
 
   CLEAR: ev_error, ev_file_name, ev_row_count, ev_file_size.
 
@@ -71,10 +73,11 @@ FUNCTION Z_EXPORT_TABLE.
     RETURN.
   ENDIF.
 
-  DATA(lv_check_table) = iv_table.
-  CONDENSE lv_check_table.
-  IF lv_check_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
-    ev_error = |Invalid table name (only A-Z, 0-9, underscore, slash allowed): { lv_check_table }|.
+  lv_check_table = iv_table.
+  CONDENSE lv_check_table NO-GAPS.
+  TRANSLATE lv_check_table TO UPPER CASE.
+  IF NOT lv_check_table CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
+    ev_error = |Invalid table name (only A-Z, 0-9, _, / allowed): { lv_check_table }|.
     RETURN.
   ENDIF.
 
@@ -90,10 +93,11 @@ FUNCTION Z_EXPORT_TABLE.
   "---------------------------------------------------------------------
   " Validate date field name if provided
   IF iv_date_field IS NOT INITIAL.
-    DATA(lv_check_field) = iv_date_field.
-    CONDENSE lv_check_field.
-    IF lv_check_field CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
-      ev_error = |Invalid date field name: { lv_check_field }|.
+    lv_check_field = iv_date_field.
+    CONDENSE lv_check_field NO-GAPS.
+    TRANSLATE lv_check_field TO UPPER CASE.
+    IF NOT lv_check_field CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
+      ev_error = |Invalid date field name (only A-Z, 0-9, _, / allowed): { lv_check_field }|.
       RETURN.
     ENDIF.
   ENDIF.
@@ -185,9 +189,10 @@ FUNCTION Z_EXPORT_TABLE.
   " Validate field names — only alphanumeric and underscore allowed
   "---------------------------------------------------------------------*
   LOOP AT lt_export_fields INTO lv_fieldname.
-    CONDENSE lv_fieldname.
-    IF lv_fieldname CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
-      ev_error = |Invalid field name (only A-Z, 0-9, underscore, slash allowed): { lv_fieldname }|.
+    CONDENSE lv_fieldname NO-GAPS.
+    TRANSLATE lv_fieldname TO UPPER CASE.
+    IF NOT lv_fieldname CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
+      ev_error = |Invalid field name (only A-Z, 0-9, _, / allowed): { lv_fieldname }|.
       RETURN.
     ENDIF.
   ENDLOOP.

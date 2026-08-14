@@ -43,16 +43,22 @@ FUNCTION Z_CDC_INIT.
         lv_exists TYPE i,
         lv_last_seq TYPE i,
         lv_last_time TYPE timestampl,
-        lv_age_hours TYPE p DECIMALS 2.
+        lv_age_hours TYPE p DECIMALS 2,
+        lv_check_table TYPE string.
 
   CLEAR: ev_error, ev_log_table, ev_trigger_exists, ev_gap_detected,
          ev_last_log_seq, ev_last_log_time.
 
-  " Validate table name — only alphanumeric, underscore and slash (for namespaces like /BIC/) allowed
-  DATA(lv_check_table) = iv_table.
-  CONDENSE lv_check_table.
-  IF lv_check_table IS INITIAL OR lv_check_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
-    ev_error = |Invalid table name (only A-Z, 0-9, underscore, slash allowed): { lv_check_table }|.
+  " Validate table name — only A-Z, 0-9, underscore and slash (for namespaces like /BIC/) allowed
+  lv_check_table = iv_table.
+  CONDENSE lv_check_table NO-GAPS.
+  TRANSLATE lv_check_table TO UPPER CASE.
+  IF lv_check_table IS INITIAL.
+    ev_error = 'IV_TABLE is empty'.
+    RETURN.
+  ENDIF.
+  IF NOT lv_check_table CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
+    ev_error = |Invalid table name (only A-Z, 0-9, _, / allowed): { lv_check_table }|.
     RETURN.
   ENDIF.
 
@@ -233,10 +239,10 @@ FUNCTION Z_CDC_INIT.
 
   " Build new-row key expression
   LOOP AT lt_keyfields INTO lv_key.
-    CONDENSE lv_key.
-    " lv_key already CONDENSE'd above — CN check is safe
-    IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
-      ev_error = |Invalid key field name (only A-Z, 0-9, underscore, slash allowed): { lv_key }|.
+    CONDENSE lv_key NO-GAPS.
+    TRANSLATE lv_key TO UPPER CASE.
+    IF NOT lv_key CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
+      ev_error = |Invalid key field name (only A-Z, 0-9, _, / allowed): { lv_key }|.
       RETURN.
     ENDIF.
     IF lv_key_expr IS INITIAL.
@@ -248,10 +254,10 @@ FUNCTION Z_CDC_INIT.
 
   " Build old-row key expression (for DELETE trigger)
   LOOP AT lt_keyfields INTO lv_key.
-    CONDENSE lv_key.
-    " lv_key already CONDENSE'd above — CN check is safe
-    IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/'.
-      ev_error = |Invalid key field name (only A-Z, 0-9, underscore, slash allowed): { lv_key }|.
+    CONDENSE lv_key NO-GAPS.
+    TRANSLATE lv_key TO UPPER CASE.
+    IF NOT lv_key CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
+      ev_error = |Invalid key field name (only A-Z, 0-9, _, / allowed): { lv_key }|.
       RETURN.
     ENDIF.
     IF lv_key_expr_old IS INITIAL.
