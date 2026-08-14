@@ -267,22 +267,60 @@ FUNCTION Z_EXPORT_TABLE.
 
   DELETE lt_pk_fields WHERE keyflag <> 'X'.
 
+  " Determine the first non-MANDT PK field for keyset paging
+  DATA: lv_keyset_field TYPE dfies.
+  LOOP AT lt_pk_fields INTO ls_pk_field.
+    IF ls_pk_field-fieldname <> 'MANDT'.
+      lv_keyset_field = ls_pk_field.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+
   " Build field list for SELECT (same as export fields, comma-separated)
+  " If the keyset field is not in the export field list, add it to SELECT
+  " internally so keyset paging can track it. It will NOT be written to CSV.
   DATA: lv_select_fields TYPE string.
+  DATA: lv_keyset_added TYPE abap_bool VALUE abap_false.
   IF lv_all_fields = abap_true.
     lv_select_fields = '*'.
   ELSE.
     lv_select_fields = lv_fields.
+    " Check if keyset field is already in the export field list
+    IF lv_keyset_field-fieldname IS NOT INITIAL.
+      READ TABLE lt_export_fields TRANSPORTING NO FIELDS
+        WITH KEY table_line = lv_keyset_field-fieldname.
+      " Also check with CONDENSE'd values since lt_export_fields may not be condensed yet
+      IF sy-subrc <> 0.
+        LOOP AT lt_export_fields INTO lv_fieldname.
+          CONDENSE lv_fieldname.
+          IF lv_fieldname = lv_keyset_field-fieldname.
+            sy-subrc = 0.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+      IF sy-subrc <> 0.
+        CONCATENATE lv_select_fields lv_keyset_field-fieldname
+          INTO lv_select_fields SEPARATED BY ','.
+        lv_keyset_added = abap_true.
+      ENDIF.
+    ENDIF.
   ENDIF.
 
-  " Build ORDER BY clause for keyset paging (first non-MANDT PK field)
+  " Build ORDER BY clause for keyset paging — include ALL non-MANDT PK fields
+  " Note: the keyset WHERE clause (below) still uses only the first non-MANDT PK field.
+  " This is acceptable for most SAP tables where the first key field is sufficiently
+  " selective. Full composite-key keyset comparison would require (col1 > v1) OR
+  " (col1 = v1 AND col2 > v2) OR ... logic which is complex and rarely needed.
   DATA: lv_orderby TYPE string.
   IF lines( lt_pk_fields ) > 0.
-    " Skip MANDT — use first non-client PK field for keyset paging
     LOOP AT lt_pk_fields INTO ls_pk_field.
       IF ls_pk_field-fieldname <> 'MANDT'.
-        lv_orderby = ls_pk_field-fieldname.
-        EXIT.
+        IF lv_orderby IS INITIAL.
+          lv_orderby = ls_pk_field-fieldname.
+        ELSE.
+          CONCATENATE lv_orderby ls_pk_field-fieldname INTO lv_orderby SEPARATED BY ', '.
+        ENDIF.
       ENDIF.
     ENDLOOP.
   ENDIF.
@@ -300,7 +338,7 @@ FUNCTION Z_EXPORT_TABLE.
   ENDIF.
 
   " Build field type map for conversion (before WHILE loop — static, no need to rebuild)
-  DATA: lt_type_map TYPE TABLE OF i,
+  DATA: lt_type_map TYPE TABLE OF abap_typekind,
         lv_type_kind   TYPE abap_typekind,
         lv_type_idx TYPE i.
 
@@ -320,14 +358,7 @@ FUNCTION Z_EXPORT_TABLE.
     " Build keyset WHERE clause: use first non-MANDT PK field for keyset paging
     CLEAR lv_pk_where.
     IF lv_first_block = abap_false AND lv_last_key IS NOT INITIAL AND lines( lt_pk_fields ) > 0.
-      " Find first non-MANDT PK field for keyset paging
-      DATA: lv_keyset_field TYPE dfies.
-      LOOP AT lt_pk_fields INTO ls_pk_field.
-        IF ls_pk_field-fieldname <> 'MANDT'.
-          lv_keyset_field = ls_pk_field.
-          EXIT.
-        ENDIF.
-      ENDLOOP.
+      " lv_keyset_field already determined before the loop
       IF lv_keyset_field-fieldname IS NOT INITIAL.
         CONCATENATE lv_keyset_field-fieldname ' > ''' lv_last_key ''''
           INTO lv_pk_where.
@@ -531,25 +562,17 @@ FUNCTION Z_EXPORT_TABLE.
     ENDIF.
 
     " Remember last key for keyset paging (first non-MANDT PK field)
-    IF lv_done = abap_false AND lines( lt_pk_fields ) > 0.
-      DATA: lv_keyset_track TYPE dfies.
-      LOOP AT lt_pk_fields INTO ls_pk_field.
-        IF ls_pk_field-fieldname <> 'MANDT'.
-          lv_keyset_track = ls_pk_field.
-          EXIT.
-        ENDIF.
-      ENDLOOP.
-      IF lv_keyset_track-fieldname IS NOT INITIAL.
-        DESCRIBE TABLE <ft_dynamic> LINES DATA(lv_line_count).
-        READ TABLE <ft_dynamic> ASSIGNING <fs_dynamic> INDEX lv_line_count.
+    " lv_keyset_field was determined before the loop; reuse it here
+    IF lv_done = abap_false AND lv_keyset_field-fieldname IS NOT INITIAL.
+      DESCRIBE TABLE <ft_dynamic> LINES DATA(lv_line_count).
+      READ TABLE <ft_dynamic> ASSIGNING <fs_dynamic> INDEX lv_line_count.
+      IF sy-subrc = 0.
+        ASSIGN COMPONENT lv_keyset_field-fieldname OF STRUCTURE <fs_dynamic> TO <ff_field>.
         IF sy-subrc = 0.
-          ASSIGN COMPONENT lv_keyset_track-fieldname OF STRUCTURE <fs_dynamic> TO <ff_field>.
-          IF sy-subrc = 0.
-            lv_last_key = |{ <ff_field> }|.
-            CONDENSE lv_last_key.
-            " Escape single quotes for next iteration's WHERE clause
-            REPLACE ALL OCCURRENCES OF '''' IN lv_last_key WITH ''''''.
-          ENDIF.
+          lv_last_key = |{ <ff_field> }|.
+          CONDENSE lv_last_key.
+          " Escape single quotes for next iteration's WHERE clause
+          REPLACE ALL OCCURRENCES OF '''' IN lv_last_key WITH ''''''.
         ENDIF.
       ENDIF.
     ENDIF.

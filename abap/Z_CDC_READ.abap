@@ -232,7 +232,7 @@ FUNCTION Z_CDC_READ.
 
   lv_count = 0.
 
-  WHILE lo_result->next( ) = 0.
+  WHILE lo_result->next( ) > 0.
     " Read log columns — use get_char for string columns, explicit for int
     lv_seq = lo_result->get_int( ).
     lv_operation = lo_result->get_char( ).
@@ -281,7 +281,7 @@ FUNCTION Z_CDC_READ.
         IF lv_where IS INITIAL.
           CONCATENATE ls_ddic_key-fieldname ' = ''' lv_key_value '''' INTO lv_where.
         ELSE.
-          CONCATENATE lv_where ' AND ' ls_ddic_key-fieldname ' = ''' lv_key_value '''' INTO lv_where SEPARATED BY space.
+          CONCATENATE lv_where ' AND ' ls_ddic_key-fieldname ' = ''' lv_key_value '''' INTO lv_where.
         ENDIF.
       ENDLOOP.
 

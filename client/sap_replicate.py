@@ -198,6 +198,9 @@ class SqlServerConnection:
     def commit(self):
         self.conn.commit()
 
+    def rollback(self):
+        self.conn.rollback()
+
     def close(self):
         if self.conn:
             self.conn.close()
@@ -244,7 +247,7 @@ class SchemaManager:
                 })
         return fields
 
-    def get_table_indexes(self, table: str) -> list:
+    def get_table_indexes(self, table: str, fields: list = None) -> list:
         """Read index definitions from SAP DD12L + DD17S via Z_EXECUTE_SQL."""
         # Sanitize table name
         safe_table = _validate_table_name(table)
@@ -276,7 +279,7 @@ class SchemaManager:
 
         # Get index fields for each index
         for idx in indexes:
-            safe_idx_name = idx['name'].replace("'", "''").replace(";", "")
+            safe_idx_name = _validate_field_name(idx['name'])
             query = (f"SELECT FIELDNAME, ASCDESC "
                      f"FROM DD17S WHERE TABNAME = '{safe_table}' "
                      f"AND INDEXNAME = '{safe_idx_name}' "
@@ -295,7 +298,8 @@ class SchemaManager:
                     })
 
         # Also get primary key from DD03L
-        fields = self.get_table_fields(table)
+        if fields is None:
+            fields = self.get_table_fields(table)
         pk_fields = [f['name'] for f in fields if f['keyflag']]
         if pk_fields:
             indexes.insert(0, {
@@ -390,13 +394,14 @@ class SchemaManager:
             return False
 
         # Create indexes
-        return self.create_indexes(table, target)
+        return self.create_indexes(table, target, fields=fields)
 
-    def create_indexes(self, table: str, target_table: str = None) -> bool:
+    def create_indexes(self, table: str, target_table: str = None,
+                       fields: list = None) -> bool:
         """Create indexes on MSSQL table matching SAP indexes."""
         target = target_table or table
         safe_target = _validate_table_name(target)
-        indexes = self.get_table_indexes(table)
+        indexes = self.get_table_indexes(table, fields=fields)
 
         if not indexes:
             log.info(f"  No indexes found for {table}")
@@ -559,8 +564,17 @@ class CdcReplicator:
         cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.[{safe_table}]")
         col_names = [desc[0] for desc in cursor.description]
 
+        # Case-insensitive matching: normalize both to uppercase for
+        # membership/index tests, but keep original col_names for SQL f-strings.
+        col_names_upper = [c.upper() for c in col_names]
+        key_fields_upper = [k.upper() for k in key_fields]
+        # Map each key field (original case from config) to its actual DB column name
+        key_col_map = {k: col_names[col_names_upper.index(ku)]
+                       for k, ku in zip(key_fields, key_fields_upper)}
+
         # Validate that all key_fields exist in the target table columns
-        missing_keys = [k for k in key_fields if k not in col_names]
+        missing_keys = [k for k, ku in zip(key_fields, key_fields_upper)
+                        if ku not in col_names_upper]
         if missing_keys:
             log.error(f"  Key fields not found in target table: {missing_keys}")
             return 0
@@ -595,8 +609,11 @@ class CdcReplicator:
             placeholders = ','.join(['?'] * len(col_names))
             # Use MERGE for UPSERT — works for both INSERT (new row) and
             # UPDATE (row already exists from initial load)
-            key_col_list = ' AND '.join(f"target.[{k}] = source.[{k}]" for k in key_fields)
-            non_key_cols = [c for c in col_names if c not in key_fields]
+            key_col_list = ' AND '.join(
+                f"target.[{key_col_map[k]}] = source.[{key_col_map[k]}]"
+                for k in key_fields)
+            non_key_cols = [c for c, cu in zip(col_names, col_names_upper)
+                            if cu not in key_fields_upper]
             if non_key_cols:
                 set_clause = ','.join(f"target.[{c}] = source.[{c}]" for c in non_key_cols)
                 merge_sql = (
@@ -611,26 +628,38 @@ class CdcReplicator:
                     cursor.execute(merge_sql, vals + vals)
                 self.sql.conn.commit()
             else:
-                # All columns are key fields — plain INSERT
-                insert_sql = f"INSERT INTO dbo.[{safe_table}] ({col_list}) VALUES ({placeholders})"
-                self.sql.executemany(insert_sql, inserts)
-                self.sql.commit()
+                # All columns are key fields — MERGE with WHEN NOT MATCHED only
+                # (plain INSERT would fail on PK violation for existing rows)
+                merge_sql = (
+                    f"MERGE dbo.[{safe_table}] AS target "
+                    f"USING (VALUES ({placeholders})) AS source ({col_list}) "
+                    f"ON {key_col_list} "
+                    f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({placeholders});"
+                )
+                cursor = self.sql.conn.cursor()
+                for vals in inserts:
+                    cursor.execute(merge_sql, vals + vals)
+                self.sql.conn.commit()
 
         # Batch UPDATEs (executemany with per-row WHERE)
         if updates:
-            for vals in updates:
-                set_clause = ','.join(f"[{c}] = ?" for c in col_names if c not in key_fields)
-                where = ' AND '.join(f"[{k}] = ?" for k in key_fields)
-                if not set_clause:
-                    log.warning(f"  UPDATE skipped — no non-key columns to set")
-                    continue
-                update_vals = [v for c, v in zip(col_names, vals) if c not in key_fields]
-                update_vals += [vals[col_names.index(k)] for k in key_fields]
-                self.sql.execute(
-                    f"UPDATE dbo.[{safe_table}] SET {set_clause} WHERE {where}",
-                    update_vals
-                )
-            self.sql.commit()
+            non_key_update = [c for c, cu in zip(col_names, col_names_upper)
+                              if cu not in key_fields_upper]
+            set_clause = ','.join(f"[{c}] = ?" for c in non_key_update)
+            where = ' AND '.join(f"[{key_col_map[k]}] = ?" for k in key_fields)
+            if not set_clause:
+                log.warning(f"  UPDATE skipped — no non-key columns to set")
+            else:
+                for vals in updates:
+                    update_vals = [v for c, v in zip(col_names, vals)
+                                   if c in non_key_update]
+                    update_vals += [vals[col_names_upper.index(ku)]
+                                    for ku in key_fields_upper]
+                    self.sql.execute(
+                        f"UPDATE dbo.[{safe_table}] SET {set_clause} WHERE {where}",
+                        update_vals
+                    )
+                self.sql.commit()
 
         # Batch DELETEs
         if deletes:
@@ -643,9 +672,10 @@ class CdcReplicator:
                     # Full row — extract key field values by column position
                     # Pad key_vals to match col_names length to prevent IndexError
                     if len(key_vals) < len(col_names):
-                        key_vals = key_vals + [''] * (len(col_names) - len(key_vals))
-                    key_vals = [key_vals[col_names.index(k)] for k in key_fields]
-                where = ' AND '.join(f"[{k}] = ?" for k in key_fields)
+                        key_vals = key_vals + [None] * (len(col_names) - len(key_vals))
+                    key_vals = [key_vals[col_names_upper.index(ku)]
+                                for ku in key_fields_upper]
+                where = ' AND '.join(f"[{key_col_map[k]}] = ?" for k in key_fields)
                 self.sql.execute(f"DELETE FROM dbo.[{safe_table}] WHERE {where}", key_vals)
             self.sql.commit()
 
@@ -677,7 +707,6 @@ class CdcReplicator:
 
     def sync_table(self, table: str, key_fields: str, chunk_size: int = 10000):
         """Full sync cycle: init → read → apply → cleanup."""
-        safe_table = _validate_table_name(table)
         key_field_list = [_validate_field_name(k.strip()) for k in key_fields.split(',')]
 
         # Step 1: Init (check trigger, detect gaps)
@@ -771,7 +800,6 @@ class TimeframeReplicator:
                 f"DELETE FROM dbo.[{safe_table}] WHERE [{safe_delta}] >= ?",
                 (mssql_date_from,)
             )
-            self.sql.commit()
 
             # Step 2: Read from SAP via Z_READ_TABLE with WHERE clause
             # SAP expects YYYYMMDD format (not YYYY-MM-DD)
@@ -1125,7 +1153,7 @@ class FlatfileReplicator:
             for row in reader:
                 # Pad row if needed
                 while len(row) < len(col_names):
-                    row.append('')
+                    row.append(None)
                 batch.append(row[:len(col_names)])
 
                 if len(batch) >= batch_size:
@@ -1320,6 +1348,7 @@ def run_table(table_cfg: dict, sap: SapConnection, sql: SqlServerConnection,
 
     except Exception as e:
         log.error(f"  {table}: sync failed — {e}")
+        sql.rollback()
         return False
 
 

@@ -22,11 +22,10 @@ import sys
 import json
 import os
 import logging
-import threading
 import time
 import subprocess
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize, QTimer
 from PySide6.QtWidgets import (
@@ -34,7 +33,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QLabel, QLineEdit, QComboBox, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QGroupBox, QFormLayout, QCheckBox,
     QSpinBox, QMessageBox, QFileDialog, QTextEdit, QProgressBar,
-    QStatusBar, QSplitter, QMenu, QAbstractItemView
+    QStatusBar, QMenu, QAbstractItemView
 )
 from PySide6.QtGui import QFont, QColor, QAction
 
@@ -188,21 +187,31 @@ class SyncWorker(QThread):
                     for t in self.tables_to_sync:
                         if self._cancel:
                             break
-                        if t.get('mode') == 'cdc' and t.get('key_fields'):
-                            cdc = CdcReplicator(sap, sql, state)
-                            cdc.init_table(t['name'], t['key_fields'])
-                            self.progress.emit(t['name'], "Init OK")
-                            success += 1
+                        try:
+                            if t.get('mode') == 'cdc' and t.get('key_fields'):
+                                cdc = CdcReplicator(sap, sql, state)
+                                cdc.init_table(t['name'], t['key_fields'])
+                                self.progress.emit(t['name'], "Init OK")
+                                success += 1
+                        except Exception as e:
+                            logging.error(f"Init error for {t['name']}: {e}")
+                            fail += 1
+                            self.progress.emit(t['name'], "✗ Error")
                     return
 
                 if self.action == "remove_cdc":
                     for t in self.tables_to_sync:
                         if self._cancel:
                             break
-                        cdc = CdcReplicator(sap, sql, state)
-                        cdc.remove_cdc(t['name'])
-                        self.progress.emit(t['name'], "Removed")
-                        success += 1
+                        try:
+                            cdc = CdcReplicator(sap, sql, state)
+                            cdc.remove_cdc(t['name'])
+                            self.progress.emit(t['name'], "Removed")
+                            success += 1
+                        except Exception as e:
+                            logging.error(f"Remove CDC error for {t['name']}: {e}")
+                            fail += 1
+                            self.progress.emit(t['name'], "✗ Error")
                     return
 
                 if self.action == "sync_schema":
@@ -419,6 +428,15 @@ class SettingsTab(QWidget):
         self._on_method_changed(self.ff_method.currentText())
 
     def _save(self):
+        ok, msg = self._save_silent()
+        if ok:
+            QMessageBox.information(self, "Gespeichert", msg)
+            self.config_changed.emit()
+        else:
+            QMessageBox.critical(self, "Fehler", msg)
+
+    def _save_silent(self):
+        """Save settings without showing a dialog. Returns (success, message)."""
         self.config['sap'] = {
             'ashost': self.sap_host.text(),
             'sysnr': self.sap_sysnr.text(),
@@ -442,10 +460,9 @@ class SettingsTab(QWidget):
         }
         try:
             self.config_manager.set(self.config)
-            QMessageBox.information(self, "Gespeichert", "Konfiguration erfolgreich gespeichert.")
-            self.config_changed.emit()
+            return True, "Konfiguration erfolgreich gespeichert."
         except Exception as e:
-            QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen: {e}")
+            return False, f"Speichern fehlgeschlagen: {e}"
 
     def _test_sap(self):
         try:
@@ -651,19 +668,35 @@ class TablesTab(QWidget):
         }
 
     def _save(self):
+        ok, msg = self._save_silent()
+        if ok:
+            QMessageBox.information(self, "Gespeichert", msg)
+            self.config_changed.emit()
+        else:
+            QMessageBox.critical(self, "Fehler", msg)
+
+    def _save_silent(self):
+        """Save tables without showing a dialog. Returns (success, message)."""
         tables = []
         for i in range(self.table.rowCount()):
             t = self._read_row(i)
             if t['name'] and t['name'] != 'NEW_TABLE':
                 tables.append(t)
 
+        # Preserve unknown fields (e.g. file_path) from existing config
+        old_by_name = {t.get('name'): t for t in self.config.get('tables', [])}
+        for t in tables:
+            old = old_by_name.get(t['name'], {})
+            for k, v in old.items():
+                if k not in t:
+                    t[k] = v
+
         self.config['tables'] = tables
         try:
             self.config_manager.set(self.config)
-            QMessageBox.information(self, "Gespeichert", f"{len(tables)} Tabellen gespeichert.")
-            self.config_changed.emit()
+            return True, f"{len(tables)} Tabellen gespeichert."
         except Exception as e:
-            QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen: {e}")
+            return False, f"Speichern fehlgeschlagen: {e}"
 
     def get_active_tables(self) -> list:
         tables = []
@@ -1238,8 +1271,10 @@ class ScheduleTab(QWidget):
                         self.run_tab._scheduler_triggered = True
                         self.run_tab._start_worker([table_cfg], "sync")
                     elif action == 'sync_schema':
+                        self.run_tab._scheduler_triggered = True
                         self.run_tab._start_worker([table_cfg], "sync_schema")
                     elif action == 'init_only':
+                        self.run_tab._scheduler_triggered = True
                         self.run_tab._start_worker([table_cfg], "init_only")
 
                     self.last_run_time[table] = now
@@ -1273,8 +1308,11 @@ class ScheduleTab(QWidget):
         highest_priv = self.task_highest.isChecked()
         run_background = self.task_run_background.isChecked()
 
-        # Get paths
-        app_dir = os.path.dirname(os.path.abspath(__file__))
+        # Get paths — use sys.executable dir when frozen (PyInstaller), __file__ dir otherwise
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(app_dir, "config.json")
         python_exe = sys.executable
         script_path = os.path.join(app_dir, "sap_replicate.py")
@@ -1487,10 +1525,17 @@ class MainWindow(QMainWindow):
 
     def _save_all(self):
         try:
-            self.settings_tab._save()
-            self.tables_tab._save()
-            self.schedule_tab._save_schedules()
-            self.status_bar.showMessage("Konfiguration gespeichert", 3000)
+            ok1, msg1 = self.settings_tab._save_silent()
+            ok2, msg2 = self.tables_tab._save_silent()
+            ok3, msg3 = self.schedule_tab._save_schedules_silent()
+            if ok1 and ok2 and ok3:
+                self.settings_tab.config_changed.emit()
+                self.tables_tab.config_changed.emit()
+                self.status_bar.showMessage("Konfiguration gespeichert", 3000)
+                QMessageBox.information(self, "Gespeichert", "Alle Einstellungen erfolgreich gespeichert.")
+            else:
+                errors = [m for ok, m in [(ok1, msg1), (ok2, msg2), (ok3, msg3)] if not ok]
+                QMessageBox.critical(self, "Fehler", "\n".join(errors))
         except Exception as e:
             QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen: {e}")
 
