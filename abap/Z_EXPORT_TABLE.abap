@@ -159,6 +159,14 @@ FUNCTION Z_EXPORT_TABLE.
         lt_components   TYPE cl_abap_structdescr=>component_table,
         ls_component    TYPE abap_componentdescr.
 
+  SELECT SINGLE tabname FROM dd02l INTO @DATA(lv_exists)
+    WHERE tabname = @lv_check_table
+      AND as4local = 'A'.
+  IF sy-subrc <> 0.
+    ev_error = |Table { lv_check_table } does not exist in DDIC|.
+    RETURN.
+  ENDIF.
+
   TRY.
       lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_check_table ).
     CATCH cx_root.
@@ -169,13 +177,13 @@ FUNCTION Z_EXPORT_TABLE.
   lt_components = lo_struct_descr->get_components( ).
 
   "---------------------------------------------------------------------
-  " Determine which fields to export
-  "---------------------------------------------------------------------
-  DATA: lt_export_fields TYPE TABLE OF string,
-        lv_all_fields    TYPE abap_bool,
-        lv_fieldname     TYPE string.
+   " Determine which fields to export
+   "---------------------------------------------------------------------
+   DATA: lt_export_fields TYPE TABLE OF string,
+         lv_all_fields    TYPE abap_bool,
+         lv_fieldname     TYPE string.
 
-  IF lv_fields = '*'.
+   IF lv_fields = '*'.
     lv_all_fields = abap_true.
     LOOP AT lt_components INTO ls_component.
       APPEND ls_component-name TO lt_export_fields.

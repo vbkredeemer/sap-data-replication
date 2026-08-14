@@ -108,6 +108,14 @@ FUNCTION Z_CDC_READ.
         lt_components   TYPE cl_abap_structdescr=>component_table,
         ls_component    TYPE abap_componentdescr.
 
+  SELECT SINGLE tabname FROM dd02l INTO @DATA(lv_exists)
+    WHERE tabname = @lv_check_table
+      AND as4local = 'A'.
+  IF sy-subrc <> 0.
+    ev_error = |Table { lv_check_table } does not exist in DDIC|.
+    RETURN.
+  ENDIF.
+
   TRY.
       lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_check_table ).
     CATCH cx_root.
