@@ -43,10 +43,18 @@ FUNCTION Z_CDC_INIT.
         lv_exists TYPE i,
         lv_last_seq TYPE i,
         lv_last_time TYPE timestampl,
-        lv_age_hours TYPE i.
+        lv_age_hours TYPE p DECIMALS 2.
 
   CLEAR: ev_error, ev_log_table, ev_trigger_exists, ev_gap_detected,
          ev_last_log_seq, ev_last_log_time.
+
+  * Validate table name — only alphanumeric and underscore allowed
+  DATA: lv_invalid_char TYPE i.
+  FIND REGEX '[^A-Za-z0-9_]' IN iv_table MATCH COUNT lv_invalid_char.
+  IF lv_invalid_char > 0 OR iv_table IS INITIAL.
+    ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
+    RETURN.
+  ENDIF.
 
   *---------------------------------------------------------------------
   * Validate inputs
@@ -70,7 +78,7 @@ FUNCTION Z_CDC_INIT.
 
   lv_tab_len = strlen( iv_table ).
 
-  IF lv_tab_len > 20.
+  IF lv_tab_len > 18.
     * Table name too long — use hash to keep trigger name < 32 chars
     * Z_ + hash(6) + _CDC_TRG_INS = 3+6+13 = 22 chars (safe)
     CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'

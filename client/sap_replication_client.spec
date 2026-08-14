@@ -10,8 +10,6 @@ Usage:
 
 import os
 
-block_cipher = None
-
 a = Analysis(
     ['gui_client.py'],
     pathex=[os.path.dirname(os.path.abspath(__file__))],
@@ -36,14 +34,12 @@ a = Analysis(
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
 pyz = PYZ(
     a.pure,
     a.zipped_data,
-    cipher=block_cipher,
 )
 
 exe = EXE(

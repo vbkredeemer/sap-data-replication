@@ -52,7 +52,7 @@ FUNCTION Z_CDC_CLEANUP.
   DATA: lv_tab_len TYPE i.
   lv_tab_len = strlen( iv_table ).
 
-  IF lv_tab_len > 20.
+  IF lv_tab_len > 18.
     CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
       EXPORTING
         data = iv_table

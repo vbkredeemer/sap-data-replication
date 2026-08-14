@@ -21,10 +21,12 @@ import json
 import os
 import logging
 import threading
+import time
+import subprocess
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QLabel, QLineEdit, QComboBox, QPushButton, QTableWidget,
@@ -242,8 +244,14 @@ class SyncWorker(QThread):
                         self.progress.emit(t['name'], "✗ Error")
 
             finally:
-                sap.close()
-                sql.close()
+                try:
+                    sap.close()
+                except Exception:
+                    pass
+                try:
+                    sql.close()
+                except Exception:
+                    pass
 
         except Exception as e:
             logging.error(f"Fatal error: {e}")
@@ -398,7 +406,7 @@ class SettingsTab(QWidget):
         self.ssh_host.setText(ssh.get('host', ''))
         self.ssh_user.setText(ssh.get('user', ''))
         self.ssh_key.setText(ssh.get('key_file', ''))
-        self.ssh_port.setValue(ssh.get('port', 22))
+        self.ssh_port.setValue(int(ssh.get('port', 22)))
 
         ff = self.config.get('flatfile', {})
         self.ff_method.setCurrentText(ff.get('transfer_method', 'scp'))
@@ -554,7 +562,7 @@ class TablesTab(QWidget):
         self.table.setCellWidget(row, 7, chunk_spin)
 
         # Fields
-        self.table.setItem(row, 8, QTableWidgetItem(t.get('fields', '*')))
+        self.table.setItem(row, 8, QTableWidgetItem(t.get('fields') or '*'))
 
         # Active checkbox
         active_check = QCheckBox()
@@ -1138,7 +1146,6 @@ class ScheduleTab(QWidget):
         self.last_run_time = {}
 
         # Timer for checking schedules every 60 seconds
-        from PySide6.QtCore import QTimer
         self.scheduler_timer = QTimer()
         self.scheduler_timer.timeout.connect(self._check_schedules)
         self.scheduler_timer.start(60000)  # check every minute
@@ -1170,7 +1177,6 @@ class ScheduleTab(QWidget):
             # A sync is already running — skip
             return
 
-        import time
         now = time.time()
         config = self.config_manager.get()
         schedules = config.get('schedules', [])
@@ -1212,9 +1218,12 @@ class ScheduleTab(QWidget):
 
                     self.last_run_time[table] = now
                     break  # Only one job at a time
+                else:
+                    self.run_tab._log("WARNING",
+                        f"Scheduler: Tabelle '{table}' nicht in Konfiguration gefunden — Job übersprungen")
+                    self.last_run_time[table] = now
 
     def _export_windows_task(self):
-        import subprocess
 
         task_name = self.task_name.text().strip()
         if not task_name:
@@ -1228,8 +1237,7 @@ class ScheduleTab(QWidget):
         # Validate time format for daily/weekly
         if interval in ('daily', 'weekly'):
             try:
-                from datetime import datetime as dt
-                dt.strptime(start_time, '%H:%M')
+                datetime.strptime(start_time, '%H:%M')
             except ValueError:
                 QMessageBox.warning(self, "Fehler",
                     f"Ungültige Zeitangabe: '{start_time}'\nBitte Format HH:MM verwenden (z.B. 02:00).")
@@ -1456,6 +1464,7 @@ class MainWindow(QMainWindow):
         try:
             self.settings_tab._save()
             self.tables_tab._save()
+            self.schedule_tab._save_schedules()
             self.status_bar.showMessage("Konfiguration gespeichert", 3000)
         except Exception as e:
             QMessageBox.critical(self, "Fehler", f"Speichern fehlgeschlagen: {e}")
@@ -1466,6 +1475,8 @@ class MainWindow(QMainWindow):
         self.settings_tab._load_values()
         self.tables_tab.config = self.config_manager.get()
         self.tables_tab._load_tables()
+        self.schedule_tab.config = self.config_manager.get()
+        self.schedule_tab._load_schedules()
         self.status_bar.showMessage("Konfiguration neu geladen", 3000)
 
     def _on_tab_changed(self, index: int):
@@ -1786,7 +1797,7 @@ class MainWindow(QMainWindow):
 <p><b>Protokoll löschen:</b> Leert die Log-Ausgabe (nur Anzeige, Log-Datei wird nicht gelöscht).</p>
 <p>Sync läuft in einem Hintergrund-Thread — die GUI bleibt bedienbar während des Syncs.</p>
 
-<h3>Empfohlerte Reihenfolge</h3>
+<h3>Empfohlene Reihenfolge</h3>
 <ol>
   <li><b>Schema erstellen</b> (einmalig oder nach SAP-Änderungen) — erstellt Tabellen + Indizes</li>
   <li><b>Sync</b> — lädt Daten (erst-Load oder Delta)</li>
@@ -1876,6 +1887,8 @@ class MainWindow(QMainWindow):
                 return
             self.run_tab.worker.cancel()
             self.run_tab.worker.wait(5000)
+            if self.run_tab.worker.isRunning():
+                self.run_tab.worker.terminate()
         # Stop scheduler if running
         if hasattr(self, 'schedule_tab'):
             self.schedule_tab._stop_scheduler()

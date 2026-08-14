@@ -56,7 +56,7 @@ FUNCTION Z_CDC_READ.
   DATA: lv_tab_len TYPE i.
   lv_tab_len = strlen( iv_table ).
 
-  IF lv_tab_len > 20.
+  IF lv_tab_len > 18.
     CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
       EXPORTING
         data = iv_table
@@ -180,15 +180,21 @@ FUNCTION Z_CDC_READ.
       RETURN.
   ENDTRY.
 
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   * Query log table: get SEQ, OPERATION, KEYVALUES
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   CONCATENATE 'SELECT SEQ, OPERATION, KEYVALUES, TIMESTMP FROM '
               lv_log_table
               ' WHERE SEQ > ' iv_from_seq
               ' ORDER BY SEQ ASC'
-              ' LIMIT ' iv_chunk_size
               INTO lv_sql.
+
+  * Set max rows instead of LIMIT (ADBC doesn't support LIMIT)
+  TRY.
+      lo_sql_stmt->set_max_rows( iv_chunk_size ).
+    CATCH cx_root.
+      * set_max_rows not available — will use counter in loop
+  ENDTRY.
 
   TRY.
       lo_result = lo_sql_stmt->execute_query( lv_sql ).
@@ -210,11 +216,10 @@ FUNCTION Z_CDC_READ.
                  <fs_field>   TYPE ANY.
 
   * Create dynamic structure for original table
-  DATA: lo_table_descr TYPE REF TO cl_abap_tabledescr,
-        ls_dynamic     TYPE REF TO data.
+  DATA: ls_dynamic     TYPE REF TO data.
 
-  lo_table_descr = cl_abap_tabledescr=>create( lo_struct_descr ).
   CREATE DATA ls_dynamic TYPE HANDLE lo_struct_descr.
+  ASSIGN ls_dynamic->* TO <fs_dynamic>.
 
   lv_count = 0.
 
@@ -231,11 +236,10 @@ FUNCTION Z_CDC_READ.
     lv_timestmp = lo_result->get_char( ).
 
     lv_max_seq = lv_seq.
-    lv_count = lv_count + 1.
 
-    *-------------------------------------------------------------------
+    *-------------------------------------------------------------------*
     * Build row data
-    *-------------------------------------------------------------------
+    *-------------------------------------------------------------------*
     CLEAR lv_rowdata.
 
     * Prefix with operation
@@ -244,11 +248,11 @@ FUNCTION Z_CDC_READ.
     IF lv_operation = 'D'.
       * DELETE: only key values
       CONCATENATE lv_rowdata lv_keyvalues INTO lv_rowdata SEPARATED BY '|'.
+      lv_count = lv_count + 1.
     ELSE.
       * INSERT or UPDATE: read original row
       * Parse keyvalues and build WHERE clause
       DATA: lt_keys TYPE TABLE OF string,
-            lv_key_field TYPE string,
             lv_key_value TYPE string,
             lv_where TYPE string,
             lv_key_idx TYPE i.
@@ -257,6 +261,7 @@ FUNCTION Z_CDC_READ.
 
       * Build WHERE from key fields and key values
       * Key field names already retrieved from DDIC above (lt_ddic_keyfields)
+      CLEAR lv_where.
 
       lv_key_idx = 0.
       LOOP AT lt_ddic_keyfields INTO ls_ddic_key.
@@ -276,7 +281,7 @@ FUNCTION Z_CDC_READ.
 
       * Read original row
       TRY.
-          SELECT SINGLE * FROM (iv_table) INTO ls_dynamic
+          SELECT SINGLE * FROM (iv_table) INTO <fs_dynamic>
             WHERE (lv_where).
           IF sy-subrc = 0.
             * Build pipe-delimited row from all fields in ET_FIELDS
@@ -355,6 +360,7 @@ FUNCTION Z_CDC_READ.
 
     ls_data-rowdata = lv_rowdata.
     APPEND ls_data TO et_data.
+    lv_count = lv_count + 1.
   ENDWHILE.
 
   TRY.

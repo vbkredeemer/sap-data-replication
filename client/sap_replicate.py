@@ -29,7 +29,7 @@ import os
 import shutil
 import sys
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 try:
     from pyrfc import Connection
@@ -330,8 +330,9 @@ class SchemaManager:
         elif t in ('N', 'NUMC'):
             return f'NVARCHAR({max(length, 1)})'
         elif t in ('P', 'PACK'):
-            prec = max(length, 1)
-            scale = max(decimals, 0)
+            # SAP PACK: INTLEN is bytes, each byte = 2 digits minus 1 sign nibble
+            prec = max(length * 2 - 1, 1)
+            scale = max(int(length * 2 - 1 - decimals) if decimals else 0, 0)
             return f'DECIMAL({prec}, {scale})'
         elif t in ('F', 'FLTP'):
             return 'FLOAT(53)'
@@ -357,9 +358,11 @@ class SchemaManager:
             return False
 
         # Build CREATE TABLE statement
+        # Validate target table name early — used in constraint name and DDL
+        safe_target = _validate_table_name(target)
+
         col_defs = []
         pk_cols = []
-
         for f in fields:
             mssql_type = self._sap_type_to_mssql(f['inttype'], f['length'], f['decimals'])
             col_name = f['name']
@@ -368,10 +371,9 @@ class SchemaManager:
                 pk_cols.append(f"[{col_name}]")
 
         if pk_cols:
-            col_defs.append(f"  CONSTRAINT [PK_{target}] PRIMARY KEY ({', '.join(pk_cols)})")
+            col_defs.append(f"  CONSTRAINT [PK_{safe_target}] PRIMARY KEY ({', '.join(pk_cols)})")
 
         # Drop if exists
-        safe_target = _validate_table_name(target)
         if drop_if_exists:
             log.info(f"  Dropping dbo.[{safe_target}] if exists")
             self.sql.execute(f"IF OBJECT_ID('dbo.[{safe_target}]', 'U') IS NOT NULL DROP TABLE dbo.[{safe_target}]")
@@ -394,6 +396,7 @@ class SchemaManager:
     def create_indexes(self, table: str, target_table: str = None) -> bool:
         """Create indexes on MSSQL table matching SAP indexes."""
         target = target_table or table
+        safe_target = _validate_table_name(target)
         indexes = self.get_table_indexes(table)
 
         if not indexes:
@@ -410,7 +413,7 @@ class SchemaManager:
                 continue
 
             # Build index name — sanitize SAP index name for MSSQL
-            idx_name = f"IX_{target}_{idx['name']}"
+            idx_name = f"IX_{safe_target}_{idx['name']}"
             # MSSQL index name max 128 chars
             idx_name = idx_name[:128]
 
@@ -422,7 +425,7 @@ class SchemaManager:
 
             create_idx_sql = (
                 f"CREATE {unique_str}NONCLUSTERED INDEX [{idx_name}] "
-                f"ON dbo.[{target}] ({col_list})"
+                f"ON dbo.[{safe_target}] ({col_list})"
             )
 
             try:
@@ -634,6 +637,13 @@ class CdcReplicator:
         # Batch DELETEs
         if deletes:
             for key_vals in deletes:
+                # Extract key values by position (key fields may not be first columns)
+                if len(key_vals) == len(key_fields):
+                    # CDC log sent only key values — use as-is
+                    pass
+                else:
+                    # Full row — extract key field values by column position
+                    key_vals = [key_vals[col_names.index(k)] for k in key_fields]
                 where = ' AND '.join(f"[{k}] = ?" for k in key_fields)
                 self.sql.execute(f"DELETE FROM dbo.[{safe_table}] WHERE {where}", key_vals)
             self.sql.commit()
@@ -691,7 +701,7 @@ class CdcReplicator:
                 applied = self.apply_delta(table, rows, key_field_list)
                 total_rows += applied
                 log.info(f"  {table}: applied {applied} rows (total: {total_rows})")
-            max_seq = next_seq - 1
+                max_seq = next_seq - 1
             last_seq = next_seq
             if not has_more:
                 break
@@ -759,7 +769,7 @@ class TimeframeReplicator:
 
             # Step 2: Read from SAP via Z_READ_TABLE with WHERE clause
             # SAP expects YYYYMMDD format (not YYYY-MM-DD)
-            where_clause = f"{delta_field} >= '{date_from}'"
+            where_clause = f"{safe_delta} >= '{date_from}'"
         total_rows = 0
         skip = 0
 
@@ -1025,12 +1035,17 @@ class FlatfileReplicator:
             header = next(reader)
 
         col_names = [h.strip() for h in header]
+        # Validate column names from CSV header
+        for c in col_names:
+            _validate_field_name(c)
         col_list = ','.join(f"[{c}]" for c in col_names)
 
         # Replace mode: delete target rows before insert
+        safe_target_tbl = _validate_table_name(target_table)
+
         if replace_mode == 'replace_all':
-            log.info(f"  TRUNCATE dbo.{target_table}")
-            self.sql.execute(f"TRUNCATE TABLE dbo.{target_table}")
+            log.info(f"  TRUNCATE dbo.[{safe_target_tbl}]")
+            self.sql.execute(f"TRUNCATE TABLE dbo.[{safe_target_tbl}]")
             self.sql.commit()
         elif replace_mode == 'replace_window' and date_field and date_from:
             safe_date_field = _validate_field_name(date_field)
@@ -1053,10 +1068,10 @@ class FlatfileReplicator:
 
         # Use BULK INSERT via pyodbc (fastest method)
         # Pass the absolute path directly — BULK INSERT accepts single-quoted paths
-        csv_abs = os.path.abspath(csv_path)
+        csv_abs = os.path.abspath(csv_path).replace("'", "''")
 
         bulk_sql = f"""
-            BULK INSERT dbo.{target_table}
+            BULK INSERT dbo.[{safe_target_tbl}]
             FROM '{csv_abs}'
             WITH (
                 FORMAT = 'CSV',
@@ -1069,7 +1084,7 @@ class FlatfileReplicator:
         """
 
         try:
-            log.info(f"  BULK INSERT into dbo.{target_table}")
+            log.info(f"  BULK INSERT into dbo.[{safe_target_tbl}]")
             cursor = self.sql.execute(bulk_sql)
             self.sql.commit()
 
@@ -1088,9 +1103,10 @@ class FlatfileReplicator:
         """Fallback: batch insert via pyodbc executemany."""
         import csv
 
+        safe_target_tbl = _validate_table_name(target_table)
         placeholders = ','.join(['?'] * len(col_names))
         col_list = ','.join(f"[{c}]" for c in col_names)
-        insert_sql = f"INSERT INTO dbo.{target_table} ({col_list}) VALUES ({placeholders})"
+        insert_sql = f"INSERT INTO dbo.[{safe_target_tbl}] ({col_list}) VALUES ({placeholders})"
 
         batch = []
         total = 0
@@ -1210,7 +1226,10 @@ class FlatfileReplicator:
         if cleanup_after:
             # Delete remote file on SAP server
             log.info(f"  Cleaning up remote file: {remote_file}")
-            self.sap.call('Z_DELETE_FILE', IV_FILE_PATH=remote_file)
+            try:
+                self.sap.call('Z_DELETE_FILE', IV_FILE_PATH=remote_file)
+            except Exception as e:
+                log.warning(f"  Remote cleanup failed (data already loaded): {e}")
 
             # Delete local file
             try:

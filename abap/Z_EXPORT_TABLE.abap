@@ -81,6 +81,16 @@ FUNCTION Z_EXPORT_TABLE.
   ENDIF.
 
   *---------------------------------------------------------------------
+  * Validate date field name if provided
+  IF iv_date_field IS NOT INITIAL.
+    DATA: lv_field_found TYPE i.
+    FIND REGEX '[^A-Za-z0-9_]' IN iv_date_field MATCH COUNT lv_field_found.
+    IF lv_field_found > 0.
+      ev_error = 'Invalid date field name: ' && iv_date_field.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
   * Build WHERE clause for date filter
   *---------------------------------------------------------------------
   CLEAR lv_where.
@@ -251,29 +261,41 @@ FUNCTION Z_EXPORT_TABLE.
     lv_select_fields = lv_fields.
   ENDIF.
 
-  * Build ORDER BY clause for keyset paging (first PK field)
+  * Build ORDER BY clause for keyset paging (first non-MANDT PK field)
   DATA: lv_orderby TYPE string.
   IF lines( lt_pk_fields ) > 0.
-    READ TABLE lt_pk_fields INTO ls_pk_field INDEX 1.
-    IF sy-subrc = 0.
-      lv_orderby = ls_pk_field-fieldname.
-    ENDIF.
+    * Skip MANDT — use first non-client PK field for keyset paging
+    LOOP AT lt_pk_fields INTO ls_pk_field.
+      IF ls_pk_field-fieldname <> 'MANDT'.
+        lv_orderby = ls_pk_field-fieldname.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
   ENDIF.
 
-  * If no PK found, use primary key from DD03L as fallback
+  * If no PK found (or only MANDT), use first field from components as fallback
   IF lv_orderby IS INITIAL.
-    lv_orderby = 'MANDT'.
+    READ TABLE lt_components INTO ls_component INDEX 1.
+    IF sy-subrc = 0.
+      lv_orderby = ls_component-name.
+    ENDIF.
   ENDIF.
 
   WHILE lv_done = abap_false.
 
-    * Build keyset WHERE clause: use only FIRST PK field for simple keyset paging
+    * Build keyset WHERE clause: use first non-MANDT PK field for keyset paging
     CLEAR lv_pk_where.
     IF lv_first_block = abap_false AND lv_last_key IS NOT INITIAL AND lines( lt_pk_fields ) > 0.
-      * Keyset: WHERE first_pk_field > last_key (combined with date filter if present)
-      READ TABLE lt_pk_fields INTO ls_pk_field INDEX 1.
-      IF sy-subrc = 0.
-        CONCATENATE ls_pk_field-fieldname ' > ''' lv_last_key ''''
+      * Find first non-MANDT PK field for keyset paging
+      DATA: lv_keyset_field TYPE dfies.
+      LOOP AT lt_pk_fields INTO ls_pk_field.
+        IF ls_pk_field-fieldname <> 'MANDT'.
+          lv_keyset_field = ls_pk_field.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+      IF lv_keyset_field-fieldname IS NOT INITIAL.
+        CONCATENATE lv_keyset_field-fieldname ' > ''' lv_last_key ''''
           INTO lv_pk_where.
         IF lv_where IS NOT INITIAL.
           CONCATENATE lv_where ' AND ' lv_pk_where
@@ -388,7 +410,7 @@ FUNCTION Z_EXPORT_TABLE.
             WHEN cl_abap_structdescr=>typekind_date.
               * SAP DATE: YYYYMMDD → MSSQL: YYYY-MM-DD
               IF <ff_field> IS NOT INITIAL.
-                DATA(lv_date_str) = |{ <ff_field> }|.
+                lv_date_str = |{ <ff_field> }|.
                 IF strlen( lv_date_str ) = 8.
                   CONCATENATE lv_date_str(4) '-' lv_date_str+4(2) '-' lv_date_str+6(2)
                     INTO lv_char_val.
@@ -400,7 +422,7 @@ FUNCTION Z_EXPORT_TABLE.
             WHEN cl_abap_structdescr=>typekind_time.
               * SAP TIME: HHMMSS → MSSQL: HH:MM:SS
               IF <ff_field> IS NOT INITIAL.
-                DATA(lv_time_str) = |{ <ff_field> }|.
+                lv_time_str = |{ <ff_field> }|.
                 IF strlen( lv_time_str ) = 6.
                   CONCATENATE lv_time_str(2) ':' lv_time_str+2(2) ':' lv_time_str+4(2)
                     INTO lv_char_val.
@@ -487,18 +509,25 @@ FUNCTION Z_EXPORT_TABLE.
       lv_done = abap_true.
     ENDIF.
 
-    * Remember last key for keyset paging (first PK field)
+    * Remember last key for keyset paging (first non-MANDT PK field)
     IF lv_done = abap_false AND lines( lt_pk_fields ) > 0.
-      READ TABLE lt_pk_fields INTO ls_pk_field INDEX 1.
-      IF sy-subrc = 0.
-        * Get last row's key value
+      DATA: lv_keyset_track TYPE dfies.
+      LOOP AT lt_pk_fields INTO ls_pk_field.
+        IF ls_pk_field-fieldname <> 'MANDT'.
+          lv_keyset_track = ls_pk_field.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+      IF lv_keyset_track-fieldname IS NOT INITIAL.
         DESCRIBE TABLE <ft_dynamic> LINES DATA(lv_line_count).
         READ TABLE <ft_dynamic> ASSIGNING <fs_dynamic> INDEX lv_line_count.
         IF sy-subrc = 0.
-          ASSIGN COMPONENT ls_pk_field-fieldname OF STRUCTURE <fs_dynamic> TO <ff_field>.
+          ASSIGN COMPONENT lv_keyset_track-fieldname OF STRUCTURE <fs_dynamic> TO <ff_field>.
           IF sy-subrc = 0.
             lv_last_key = |{ <ff_field> }|.
             CONDENSE lv_last_key.
+            * Escape single quotes for next iteration's WHERE clause
+            REPLACE ALL OCCURRENCES OF '''' IN lv_last_key WITH ''''''.
           ENDIF.
         ENDIF.
       ENDIF.
@@ -526,10 +555,5 @@ FUNCTION Z_EXPORT_TABLE.
   *---------------------------------------------------------------------
   ev_row_count = lv_total.
   ev_file_size = lv_size.
-
-  IF lv_total = 0.
-    * Empty file — still valid, just no data
-    ev_error = ''.
-  ENDIF.
 
 ENDFUNCTION.
