@@ -68,5 +68,6 @@
       "file_path": "/usr/sap/tmp/",
       "fields": "*"
     }
-  ]
+  ],
+  "schedules": []
 }

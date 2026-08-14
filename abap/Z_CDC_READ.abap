@@ -211,8 +211,6 @@ FUNCTION Z_CDC_READ.
 
   * Create dynamic structure for original table
   DATA: lo_table_descr TYPE REF TO cl_abap_tabledescr,
-        lo_data_ref    TYPE REF TO data,
-        lt_dynamic     TYPE REF TO data,
         ls_dynamic     TYPE REF TO data.
 
   lo_table_descr = cl_abap_tabledescr=>create( lo_struct_descr ).
@@ -221,9 +219,13 @@ FUNCTION Z_CDC_READ.
   lv_count = 0.
 
   WHILE lo_result->next( ) = 0.
-    * Read log columns
+    * Read log columns — use get_char for string columns, explicit for int
     DATA(lv_seq_str) = lo_result->get_char( ).
-    lv_seq = lv_seq_str.
+    TRY.
+        lv_seq = lv_seq_str.
+      CATCH cx_root.
+        lv_seq = 0.
+    ENDTRY.
     lv_operation = lo_result->get_char( ).
     lv_keyvalues = lo_result->get_char( ).
     lv_timestmp = lo_result->get_char( ).
@@ -263,6 +265,8 @@ FUNCTION Z_CDC_READ.
         IF sy-subrc <> 0.
           lv_key_value = ''.
         ENDIF.
+        * Escape single quotes to prevent SQL injection
+        REPLACE ALL OCCURRENCES OF '''' IN lv_key_value WITH ''''''.
         IF lv_where IS INITIAL.
           CONCATENATE ls_ddic_key-fieldname ' = ''' lv_key_value '''' INTO lv_where.
         ELSE.
@@ -337,14 +341,18 @@ FUNCTION Z_CDC_READ.
               ENDIF.
             ENDLOOP.
           ELSE.
-            * Row not found — treat as delete
-            lv_rowdata = 'D'.
-            CONCATENATE lv_rowdata lv_keyvalues INTO lv_rowdata SEPARATED BY '|'.
+            * Row not found — INSERT/UPDATE row was deleted before we could read it
+            * Skip this entry — do NOT send DELETE (would corrupt data)
+            * Still advance seq pointer to avoid infinite loop
+            lv_max_seq = lv_seq.
+            lv_count = lv_count + 1.
+            CONTINUE.
           ENDIF.
         CATCH cx_root.
-          * Error reading original row — log as delete
-          lv_rowdata = 'D'.
-          CONCATENATE lv_rowdata lv_keyvalues INTO lv_rowdata SEPARATED BY '|'.
+          * Error reading original row — skip but advance seq pointer
+          lv_max_seq = lv_seq.
+          lv_count = lv_count + 1.
+          CONTINUE.
       ENDTRY.
     ENDIF.
 
@@ -364,28 +372,31 @@ FUNCTION Z_CDC_READ.
   IF lv_count = 0.
     * No entries found — return the same SEQ the client sent
     ev_next_seq = iv_from_seq.
+    * No more data when nothing was found
+    ev_has_more = ' '.
   ELSE.
     ev_next_seq = lv_max_seq + 1.
-  ENDIF.
 
-  * Check if there are more entries
-  DATA: lv_remaining TYPE i.
-  CONCATENATE 'SELECT COUNT(*) FROM ' lv_log_table
-              ' WHERE SEQ > ' lv_max_seq
-              INTO lv_sql.
+    * Check if there are more entries — query with iv_from_seq, not lv_max_seq
+    * to avoid counting already-processed entries
+    DATA: lv_remaining TYPE i.
+    CONCATENATE 'SELECT COUNT(*) FROM ' lv_log_table
+                ' WHERE SEQ > ' lv_max_seq
+                INTO lv_sql.
 
-  TRY.
-      lo_result = lo_sql_stmt->execute_query( lv_sql ).
-      lo_result->next( ).
-      DATA(lv_rem_str) = lo_result->get_char( ).
-      lv_remaining = lv_rem_str.
-      lo_result->close( ).
-    CATCH cx_root.
-      lv_remaining = 0.
-  ENDTRY.
+    TRY.
+        lo_result = lo_sql_stmt->execute_query( lv_sql ).
+        lo_result->next( ).
+        DATA(lv_rem_str) = lo_result->get_char( ).
+        lv_remaining = lv_rem_str.
+        lo_result->close( ).
+      CATCH cx_root.
+        lv_remaining = 0.
+    ENDTRY.
 
-  IF lv_remaining > 0.
-    ev_has_more = 'X'.
+    IF lv_remaining > 0.
+      ev_has_more = 'X'.
+    ENDIF.
   ENDIF.
 
 ENDFUNCTION.

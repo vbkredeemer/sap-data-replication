@@ -57,6 +57,7 @@ FUNCTION Z_EXPORT_TABLE.
         lv_timestamp    TYPE string,
         lv_header       TYPE string,
         lv_row          TYPE string,
+        lv_char_val     TYPE string,
         lv_count        TYPE i,
         lv_size         TYPE i.
 
@@ -176,7 +177,7 @@ FUNCTION Z_EXPORT_TABLE.
   * Open file for writing
   *---------------------------------------------------------------------
   TRY.
-      OPEN DATASET ev_file_name FOR OUTPUT IN TEXT MODE ENCODING UTF-8.
+      OPEN DATASET ev_file_name FOR OUTPUT IN TEXT MODE ENCODING DEFAULT.
     CATCH cx_root INTO DATA(lo_cx_open).
       ev_error = 'Cannot open file: ' && lo_cx_open->get_text( ).
       RETURN.
@@ -246,29 +247,31 @@ FUNCTION Z_EXPORT_TABLE.
     lv_select_fields = lv_fields.
   ENDIF.
 
+  * Build ORDER BY clause for keyset paging (first PK field)
+  DATA: lv_orderby TYPE string.
+  IF lines( lt_pk_fields ) > 0.
+    READ TABLE lt_pk_fields INTO ls_pk_field INDEX 1.
+    IF sy-subrc = 0.
+      lv_orderby = ls_pk_field-fieldname.
+    ENDIF.
+  ENDIF.
+
   WHILE lv_done = abap_false.
 
-    * Build keyset WHERE clause: combine date filter + key paging
+    * Build keyset WHERE clause: use only FIRST PK field for simple keyset paging
     CLEAR lv_pk_where.
-    IF lv_first_block = abap_false AND lv_last_key IS NOT INITIAL.
-      * Keyset: WHERE key > last_key
-      DATA: lv_key_idx TYPE i VALUE 1.
-      LOOP AT lt_pk_fields INTO ls_pk_field.
-        IF lv_key_idx = 1.
-          CONCATENATE ls_pk_field-fieldname ' > ''' lv_last_key ''''
-            INTO lv_pk_where.
-        ELSE.
-          CONCATENATE lv_pk_where ' AND ' ls_pk_field-fieldname ' > ''' lv_last_key ''''
+    IF lv_first_block = abap_false AND lv_last_key IS NOT INITIAL AND lines( lt_pk_fields ) > 0.
+      * Keyset: WHERE first_pk_field > last_key (combined with date filter if present)
+      READ TABLE lt_pk_fields INTO ls_pk_field INDEX 1.
+      IF sy-subrc = 0.
+        CONCATENATE ls_pk_field-fieldname ' > ''' lv_last_key ''''
+          INTO lv_pk_where.
+        IF lv_where IS NOT INITIAL.
+          CONCATENATE lv_where ' AND ' lv_pk_where
             INTO lv_pk_where SEPARATED BY space.
         ENDIF.
-        lv_key_idx = lv_key_idx + 1.
-      ENDLOOP.
-      * Combine with date filter
-      IF lv_where IS NOT INITIAL.
-        CONCATENATE lv_where ' AND ' lv_pk_where
-          INTO lv_pk_where SEPARATED BY space.
       ELSE.
-        lv_pk_where = lv_pk_where.
+        lv_pk_where = lv_where.
       ENDIF.
     ELSE.
       lv_pk_where = lv_where.
@@ -290,11 +293,13 @@ FUNCTION Z_EXPORT_TABLE.
 
             SELECT (lv_select_fields) FROM (iv_table)
               WHERE (lv_pk_where)
-              INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS.
+              INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS
+              ORDER BY (lv_orderby).
           ELSE.
             SELECT (lv_select_fields) FROM (iv_table)
               WHERE (lv_pk_where)
-              INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS.
+              INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS
+              ORDER BY (lv_orderby).
           ENDIF.
         ELSE.
           IF iv_max_rows > 0.
@@ -308,10 +313,12 @@ FUNCTION Z_EXPORT_TABLE.
             ENDIF.
 
             SELECT (lv_select_fields) FROM (iv_table)
-              INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS.
+              INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS
+              ORDER BY (lv_orderby).
           ELSE.
             SELECT (lv_select_fields) FROM (iv_table)
-              INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS.
+              INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS
+              ORDER BY (lv_orderby).
           ENDIF.
         ENDIF.
 
@@ -331,24 +338,12 @@ FUNCTION Z_EXPORT_TABLE.
       EXIT.
     ENDIF.
 
-    *-------------------------------------------------------------------
+    *-------------------------------------------------------------------*
     * Write rows to CSV with type-aware conversion
-    * SAP types are converted to MSSQL-compatible formats:
-    *   DATE (D)  → YYYY-MM-DD        (MSSQL DATE)
-    *   TIME (T)  → HH:MM:SS          (MSSQL TIME)
-    *   PACKED (P)→ Decimal with dot  (MSSQL DECIMAL, no thousand separators)
-    *   INT (I)   → Integer            (MSSQL INT)
-    *   FLOAT (F) → Scientific or decimal (MSSQL FLOAT)
-    *   CHAR (C)  → As-is              (MSSQL VARCHAR/NVARCHAR)
-    *   RAW (X)   → Hex string         (MSSQL VARBINARY — 0x prefixed)
-    *-------------------------------------------------------------------
+    *-------------------------------------------------------------------*
     * Build field type map for conversion
-    DATA: lt_field_types TYPE TABLE OF abap_componentdescr,
-          ls_field_type  TYPE abap_componentdescr,
-          lv_type_kind   TYPE abap_typekind.
-
-    * Get type info for each export field
     DATA: lt_type_map TYPE TABLE OF i,  " stores type_kind per field
+          lv_type_kind   TYPE abap_typekind,
           lv_type_idx TYPE i.
 
     LOOP AT lt_export_fields INTO lv_fieldname.
@@ -384,7 +379,7 @@ FUNCTION Z_EXPORT_TABLE.
             WHEN cl_abap_structdescr=>typekind_date.
               * SAP DATE: YYYYMMDD → MSSQL: YYYY-MM-DD
               IF <ff_field> IS NOT INITIAL.
-                DATA(lv_date_str) = |{ <ff_field> ALPHA = IN }|.
+                DATA(lv_date_str) = |{ <ff_field> }|.
                 IF strlen( lv_date_str ) = 8.
                   CONCATENATE lv_date_str(4) '-' lv_date_str+4(2) '-' lv_date_str+6(2)
                     INTO lv_char_val.

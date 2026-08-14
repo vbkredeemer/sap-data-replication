@@ -66,6 +66,65 @@ log = logging.getLogger('sap_replicate')
 
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+import re
+
+_VALID_TABLE_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_/]{0,30}$')
+
+def _validate_table_name(name: str) -> str:
+    """Validate and sanitize a table name for use in SQL."""
+    if not name or not _VALID_TABLE_RE.match(name):
+        raise ValueError(f"Invalid table name: {name!r}")
+    return name.replace("'", "''")
+
+def _validate_field_name(name: str) -> str:
+    """Validate and sanitize a field name for use in SQL."""
+    if not name or not re.match(r'^[A-Za-z_][A-Za-z0-9_]{0,40}$', name):
+        raise ValueError(f"Invalid field name: {name!r}")
+    return name
+
+
+# ============================================================================
+# Helpers — shared window range calculation
+# ============================================================================
+
+def _calculate_window_range(window: str) -> Tuple[str, str]:
+    """
+    Calculate the date range covering the current AND previous period.
+    Returns (from_date, to_date) as YYYYMMDD strings.
+    For 'all': returns ('', '') meaning no date filter — full table load.
+    to_date is always today (inclusive).
+    from_date is the start of the PREVIOUS period.
+    """
+    today = date.today()
+    
+    if window == 'all':
+        return '', ''
+    
+    if window == 'day':
+        prev = today - timedelta(days=1)
+        return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+    elif window == 'week':
+        current_week_start = today - timedelta(days=today.weekday())
+        prev_week_start = current_week_start - timedelta(days=7)
+        return prev_week_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+    elif window == 'month':
+        if today.month == 1:
+            prev_month_start = today.replace(year=today.year - 1, month=12, day=1)
+        else:
+            prev_month_start = today.replace(month=today.month - 1, day=1)
+        return prev_month_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+    elif window == 'year':
+        prev_year_start = today.replace(year=today.year - 1, month=1, day=1)
+        return prev_year_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+    else:
+        prev = today - timedelta(days=1)
+        return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+
+
+# ============================================================================
 # SAP Connection
 # ============================================================================
 
@@ -415,13 +474,21 @@ class StateManager:
         return row[0] if row else 0
 
     def set_last_seq(self, table: str, seq: int, mode: str):
-        self.sql.execute("""
-            MERGE CDC_STATE AS target
-            USING (SELECT ? AS table_name, ? AS last_seq, ? AS mode) AS source
-            ON target.table_name = source.table_name
-            WHEN MATCHED THEN UPDATE SET last_seq = source.last_seq, last_sync = GETDATE(), mode = source.mode
-            WHEN NOT MATCHED THEN INSERT (table_name, last_seq, last_sync, mode) VALUES (source.table_name, source.last_seq, GETDATE(), source.mode);
-        """, (table, seq, mode))
+        # Use IF EXISTS pattern instead of MERGE for broader compatibility
+        cursor = self.sql.execute(
+            "SELECT COUNT(*) FROM CDC_STATE WHERE table_name = ?", (table,)
+        )
+        row = cursor.fetchone()
+        if row and row[0] > 0:
+            self.sql.execute(
+                "UPDATE CDC_STATE SET last_seq = ?, last_sync = GETDATE(), mode = ? WHERE table_name = ?",
+                (seq, mode, table)
+            )
+        else:
+            self.sql.execute(
+                "INSERT INTO CDC_STATE (table_name, last_seq, last_sync, mode) VALUES (?, ?, GETDATE(), ?)",
+                (table, seq, mode)
+            )
         self.sql.commit()
 
 
@@ -519,13 +586,34 @@ class CdcReplicator:
                 else:  # U
                     updates.append(vals)
 
-        # Batch INSERTs
+        # Batch INSERTs — use MERGE for UPSERT semantics (handles both I and U)
         if inserts:
-            placeholders = ','.join(['?'] * len(col_names))
             col_list = ','.join(col_names)
-            insert_sql = f"INSERT INTO dbo.{table} ({col_list}) VALUES ({placeholders})"
-            self.sql.executemany(insert_sql, inserts)
-            self.sql.commit()
+            placeholders = ','.join(['?'] * len(col_names))
+            # Use MERGE for UPSERT — works for both INSERT (new row) and
+            # UPDATE (row already exists from initial load)
+            key_col_list = ','.join(f"[{k}]" for k in key_fields)
+            non_key_cols = [c for c in col_names if c not in key_fields]
+            if non_key_cols:
+                set_clause = ','.join(f"target.[{c}] = source.[{c}]" for c in non_key_cols)
+                merge_sql = (
+                    f"MERGE dbo.{table} AS target "
+                    f"USING (VALUES ({placeholders})) AS source ({col_list}) "
+                    f"ON target.{key_col_list} = source.{key_col_list} "
+                    f"WHEN MATCHED THEN UPDATE SET {set_clause} "
+                    f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({placeholders});"
+                )
+                # NOTE: MERGE with executemany requires fast_executemany off
+                # because each row is a separate MERGE statement
+                cursor = self.sql.conn.cursor()
+                for vals in inserts:
+                    cursor.execute(merge_sql, vals + vals)
+                self.sql.conn.commit()
+            else:
+                # All columns are key fields — plain INSERT
+                insert_sql = f"INSERT INTO dbo.{table} ({col_list}) VALUES ({placeholders})"
+                self.sql.executemany(insert_sql, inserts)
+                self.sql.commit()
 
         # Batch UPDATEs (executemany with per-row WHERE)
         if updates:
@@ -608,6 +696,10 @@ class CdcReplicator:
             last_seq = next_seq
             if not has_more:
                 break
+            # Guard: if no rows but has_more is true, break to prevent infinite loop
+            if not rows and has_more:
+                log.warning(f"  {table}: has_more=true but no rows — breaking to prevent loop")
+                break
 
         # Step 4: Save state
         self.state.set_last_seq(table, max_seq, 'cdc')
@@ -632,54 +724,8 @@ class TimeframeReplicator:
         self.sql = sql
 
     def _get_window_range(self, window: str) -> Tuple[str, str]:
-        """
-        Calculate the date range covering the current AND previous period.
-        
-        Returns (from_date, to_date) as YYYYMMDD strings.
-        For 'all': returns ('', '') meaning no date filter — full table load.
-        to_date is always today (inclusive).
-        from_date is the start of the PREVIOUS period.
-        """
-        today = date.today()
-        
-        if window == 'all':
-            # Full table — no date filter
-            return '', ''
-        
-        if window == 'day':
-            # Current: today, Previous: yesterday
-            prev = today - timedelta(days=1)
-            return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
-            
-        elif window == 'week':
-            # Week = Monday to Sunday
-            # Current week start (Monday)
-            current_week_start = today - timedelta(days=today.weekday())
-            # Previous week start
-            prev_week_start = current_week_start - timedelta(days=7)
-            return prev_week_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
-            
-        elif window == 'month':
-            # Current month start
-            current_month_start = today.replace(day=1)
-            # Previous month start
-            if today.month == 1:
-                prev_month_start = today.replace(year=today.year - 1, month=12, day=1)
-            else:
-                prev_month_start = today.replace(month=today.month - 1, day=1)
-            return prev_month_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
-            
-        elif window == 'year':
-            # Current year start
-            current_year_start = today.replace(month=1, day=1)
-            # Previous year start
-            prev_year_start = current_year_start.replace(year=today.year - 1)
-            return prev_year_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
-            
-        else:
-            # Default: today + yesterday
-            prev = today - timedelta(days=1)
-            return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+        """Delegate to shared window range calculator."""
+        return _calculate_window_range(window)
 
     def sync_table(self, table: str, delta_field: str, window: str = 'month',
                    chunk_size: int = 10000):
@@ -867,39 +913,8 @@ class FlatfileReplicator:
         self.smb_share = smb_share  # e.g. r'\\sap-server\sap\tmp'
 
     def _get_window_range(self, window: str) -> Tuple[str, str]:
-        """
-        Calculate date range covering current AND previous period.
-        Overlap prevents data loss at period boundaries.
-        
-        Returns (from_date, to_date) as YYYYMMDD strings.
-        from_date = start of PREVIOUS period.
-        to_date = today (inclusive).
-        """
-        today = date.today()
-        
-        if window == 'all':
-            # Full table — no date filter
-            return '', ''
-        
-        if window == 'day':
-            prev = today - timedelta(days=1)
-            return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
-        elif window == 'week':
-            current_week_start = today - timedelta(days=today.weekday())
-            prev_week_start = current_week_start - timedelta(days=7)
-            return prev_week_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
-        elif window == 'month':
-            if today.month == 1:
-                prev_month_start = today.replace(year=today.year - 1, month=12, day=1)
-            else:
-                prev_month_start = today.replace(month=today.month - 1, day=1)
-            return prev_month_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
-        elif window == 'year':
-            prev_year_start = today.replace(year=today.year - 1, month=1, day=1)
-            return prev_year_start.strftime('%Y%m%d'), today.strftime('%Y%m%d')
-        else:
-            prev = today - timedelta(days=1)
-            return prev.strftime('%Y%m%d'), today.strftime('%Y%m%d')
+        """Delegate to shared window range calculator."""
+        return _calculate_window_range(window)
 
     def _download_file(self, remote_path: str, local_path: str) -> bool:
         """Download file from SAP server — supports SCP, SMB, and local methods."""
@@ -1202,7 +1217,7 @@ class FlatfileReplicator:
 # ============================================================================
 
 def load_config(path: str) -> dict:
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 

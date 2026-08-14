@@ -21,7 +21,7 @@ import json
 import os
 import logging
 import threading
-from datetime import datetime, date
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QMessageBox, QFileDialog, QTextEdit, QProgressBar,
     QStatusBar, QSplitter, QMenu, QAbstractItemView
 )
-from PySide6.QtGui import QFont, QColor, QAction, QIcon
+from PySide6.QtGui import QFont, QColor, QAction
 
 
 # ============================================================================
@@ -57,7 +57,12 @@ DEFAULT_CONFIG = {
         "key_file": "",
         "port": 22
     },
-    "tables": []
+    "flatfile": {
+        "transfer_method": "scp",
+        "smb_share": ""
+    },
+    "tables": [],
+    "schedules": []
 }
 
 TABLE_MODES = ["cdc", "timeframe", "full", "flatfile"]
@@ -145,13 +150,13 @@ class SyncWorker(QThread):
         self._cancel = True
 
     def run(self):
-        # Setup logging to emit to GUI
+        # Setup logging to emit to GUI — attach to sap_replicate logger only
         handler = GuiLogHandler()
         handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', '%H:%M:%S'))
         handler.log_signal = self.log_message
-        root_logger = logging.getLogger()
-        root_logger.addHandler(handler)
-        root_logger.setLevel(logging.INFO)
+        sap_logger = logging.getLogger('sap_replicate')
+        sap_logger.addHandler(handler)
+        sap_logger.setLevel(logging.INFO)
 
         success = 0
         fail = 0
@@ -182,6 +187,8 @@ class SyncWorker(QThread):
                             cdc = CdcReplicator(sap, sql, state)
                             cdc.init_table(t['name'], t['key_fields'])
                             self.progress.emit(t['name'], "Init OK")
+                            success += 1
+                    self.finished_all.emit(success, fail)
                     return
 
                 if self.action == "remove_cdc":
@@ -191,6 +198,8 @@ class SyncWorker(QThread):
                         cdc = CdcReplicator(sap, sql, state)
                         cdc.remove_cdc(t['name'])
                         self.progress.emit(t['name'], "Removed")
+                        success += 1
+                    self.finished_all.emit(success, fail)
                     return
 
                 if self.action == "sync_schema":
@@ -212,6 +221,7 @@ class SyncWorker(QThread):
                             logging.error(f"Schema error for {t['name']}: {e}")
                             fail += 1
                             self.progress.emit(t['name'], "✗ Error")
+                    self.finished_all.emit(success, fail)
                     return
 
                 # Normal sync
@@ -243,7 +253,7 @@ class SyncWorker(QThread):
             fail += 1
 
         finally:
-            root_logger.removeHandler(handler)
+            sap_logger.removeHandler(handler)
 
         self.finished_all.emit(success, fail)
 
@@ -758,16 +768,22 @@ class RunTab(QWidget):
     def _set_progress(self, table_name: str, status: str):
         # Find or create row
         for i in range(self.progress_table.rowCount()):
-            if self.progress_table.item(i, 0).text() == table_name:
-                self.progress_table.item(i, 1).setText(status)
-                self.progress_table.item(i, 2).setText(datetime.now().strftime('%H:%M:%S'))
+            item0 = self.progress_table.item(i, 0)
+            if item0 and item0.text() == table_name:
+                item1 = self.progress_table.item(i, 1)
+                if item1:
+                    item1.setText(status)
+                item2 = self.progress_table.item(i, 2)
+                if item2:
+                    item2.setText(datetime.now().strftime('%H:%M:%S'))
                 # Color the status
-                if '✓' in status:
-                    self.progress_table.item(i, 1).setForeground(QColor('#008800'))
-                elif '✗' in status or 'Error' in status:
-                    self.progress_table.item(i, 1).setForeground(QColor('#CC0000'))
-                elif 'Running' in status:
-                    self.progress_table.item(i, 1).setForeground(QColor('#0066CC'))
+                if item1:
+                    if '✓' in status:
+                        item1.setForeground(QColor('#008800'))
+                    elif '✗' in status or 'Error' in status:
+                        item1.setForeground(QColor('#CC0000'))
+                    elif 'Running' in status:
+                        item1.setForeground(QColor('#0066CC'))
                 return
 
         row = self.progress_table.rowCount()
@@ -1187,6 +1203,10 @@ class ScheduleTab(QWidget):
                         f"Scheduler: starte {action} für {table} (Intervall: {interval})")
 
                     if action == 'sync':
+                        # Override window from schedule config
+                        if window:
+                            table_cfg = dict(table_cfg)
+                            table_cfg['window'] = window
                         self.run_tab._start_worker([table_cfg], "sync")
                     elif action == 'sync_schema':
                         self.run_tab._start_worker([table_cfg], "sync_schema")
@@ -1207,6 +1227,16 @@ class ScheduleTab(QWidget):
         interval = self.task_interval.currentText()
         mode = self.task_mode.currentText()
         start_time = self.task_time.text().strip()
+
+        # Validate time format for daily/weekly
+        if interval in ('daily', 'weekly'):
+            try:
+                from datetime import datetime as dt
+                dt.strptime(start_time, '%H:%M')
+            except ValueError:
+                QMessageBox.warning(self, "Fehler",
+                    f"Ungültige Zeitangabe: '{start_time}'\nBitte Format HH:MM verwenden (z.B. 02:00).")
+                return
         run_user = self.task_user.text().strip().upper()
         run_password = self.task_password.text()
         highest_priv = self.task_highest.isChecked()
@@ -1323,9 +1353,6 @@ exit /b %ERRORLEVEL%
                 f"Windows-Aufgabe konnte nicht erstellt werden:\n{e}\n\n"
                 f".bat-Datei wurde erstellt: {bat_path}\n"
                 f"Log-Verzeichnis: {log_dir}")
-
-    def closeEvent(self, event):
-        self._stop_scheduler()
 
 
 # ============================================================================

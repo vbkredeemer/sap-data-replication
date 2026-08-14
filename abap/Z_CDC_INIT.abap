@@ -39,9 +39,6 @@ FUNCTION Z_CDC_INIT.
   DATA: lv_log_table TYPE tabname,
         lv_trigger_name TYPE string,
         lv_seq_name TYPE string,
-        lv_ddobj TYPE REF TO cl_abap_tabledescr,
-        lv_structdescr TYPE REF TO cl_abap_structdescr,
-        lv_ddl TYPE string,
         lv_sql TYPE string,
         lv_exists TYPE i,
         lv_last_seq TYPE i,
@@ -129,7 +126,7 @@ FUNCTION Z_CDC_INIT.
     CONCATENATE 'CREATE COLUMN TABLE ' lv_log_table ' ('
                 ' SEQ INTEGER NOT NULL,'
                 ' OPERATION VARCHAR(1) NOT NULL,'
-                ' KEYVALUES NVARCHAR(1000),'
+                ' KEYVALUES NVARCHAR(5000),'
                 ' TIMESTMP TIMESTAMP NOT NULL,'
                 ' PRIMARY KEY (SEQ)'
                 ')'
@@ -178,15 +175,18 @@ FUNCTION Z_CDC_INIT.
       * Log table empty or error — no gap
   ENDTRY.
 
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   * Check if trigger exists (HANA system table)
-  *---------------------------------------------------------------------
+  * Search for the INSERT trigger (sufficient — all three are created together)
+  *---------------------------------------------------------------------*
   DATA: lv_trigger_count TYPE i.
+  DATA: lv_trigger_full TYPE string.
+  CONCATENATE lv_trigger_name '_INS' INTO lv_trigger_full.
 
   TRY.
       DATA(lo_sql2) = NEW cl_sql_statement( ).
       DATA(lo_result) = lo_sql2->execute_query(
-        |SELECT COUNT(*) FROM SYS.TRIGGERS WHERE TRIGGER_NAME = '{ lv_trigger_name }'|
+        |SELECT COUNT(*) FROM SYS.TRIGGERS WHERE TRIGGER_NAME = '{ lv_trigger_full }'|
       ).
       lo_result->next( ).
       DATA(lv_val) = lo_result->get_char( ).
@@ -315,12 +315,8 @@ FUNCTION Z_CDC_INIT.
       RETURN.
   ENDTRY.
 
-  *---------------------------------------------------------------------
-  * Success
-  *---------------------------------------------------------------------
-  ev_trigger_exists = ' '.
-  IF ev_gap_detected = 'X'.
-    * Trigger was re-created after a gap — client should do full load
-  ENDIF.
+  *---------------------------------------------------------------------*
+  * Success — triggers created
+  *---------------------------------------------------------------------*
 
 ENDFUNCTION.

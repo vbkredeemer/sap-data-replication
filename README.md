@@ -4,7 +4,7 @@ Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohn
 
 ## Status
 
-**Code ist implementiert** — drei ABAP-Funktionsbausteine + Python-Client-Skript.
+**Code ist implementiert** — fünf ABAP-Funktionsbausteine + Python-Client-Skript.
 
 ## Lösungsansätze
 
@@ -49,7 +49,7 @@ Replikation von SAP-Tabellen in Fremdsysteme (z.B. Microsoft SQL Server) — ohn
 
 | Datei | Zweck |
 |---|---|
-| `gui_client.py` | **GUI-Client (PySide6/Qt)** — professioneller Desktop-Client mit 3 Tabs |
+| `gui_client.py` | **GUI-Client (PySide6/Qt)** — professioneller Desktop-Client mit 4 Tabs |
 | `sap_replicate.py` | Kommandozeilen-Client: CDC, Timeframe, Full-Load, Flatfile Modi |
 | `config.example.json` | Konfigurationsvorlage |
 | `requirements.txt` | Python-Abhängigkeiten (pyrfc, pyodbc, PySide6) |
