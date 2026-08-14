@@ -21,6 +21,7 @@ a = Analysis(
         'pyrfc',
         'pyodbc',
         'sap_replicate',
+        'paramiko',
     ],
     hookspath=[],
     hooksconfig={},

@@ -38,11 +38,19 @@ FUNCTION Z_CDC_CLEANUP.
 
   CLEAR: ev_error, ev_deleted.
 
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   * Validate
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   IF iv_table IS INITIAL.
     ev_error = 'IV_TABLE is empty'.
+    RETURN.
+  ENDIF.
+
+  * Validate table name — only alphanumeric and underscore allowed
+  DATA: lv_invalid_char TYPE i.
+  FIND REGEX '[^A-Za-z0-9_]' IN iv_table MATCH COUNT lv_invalid_char.
+  IF lv_invalid_char > 0.
+    ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
     RETURN.
   ENDIF.
 

@@ -248,7 +248,6 @@ FUNCTION Z_CDC_READ.
     IF lv_operation = 'D'.
       * DELETE: only key values
       CONCATENATE lv_rowdata lv_keyvalues INTO lv_rowdata SEPARATED BY '|'.
-      lv_count = lv_count + 1.
     ELSE.
       * INSERT or UPDATE: read original row
       * Parse keyvalues and build WHERE clause
@@ -268,7 +267,8 @@ FUNCTION Z_CDC_READ.
         lv_key_idx = lv_key_idx + 1.
         READ TABLE lt_keys INTO lv_key_value INDEX lv_key_idx.
         IF sy-subrc <> 0.
-          lv_key_value = ''.
+          * Key value missing — skip this malformed entry
+          CONTINUE.
         ENDIF.
         * Escape single quotes to prevent SQL injection
         REPLACE ALL OCCURRENCES OF '''' IN lv_key_value WITH ''''''.
@@ -287,7 +287,7 @@ FUNCTION Z_CDC_READ.
             * Build pipe-delimited row from all fields in ET_FIELDS
             * Type-aware conversion to MSSQL-compatible formats
             LOOP AT et_fields INTO ls_field_cat.
-              ASSIGN COMPONENT ls_field_cat-fieldname OF STRUCTURE ls_dynamic TO <fs_field>.
+              ASSIGN COMPONENT ls_field_cat-fieldname OF STRUCTURE <fs_dynamic> TO <fs_field>.
               IF sy-subrc = 0.
                 CLEAR lv_field_value.
                 CASE ls_field_cat-datatype.
@@ -317,7 +317,10 @@ FUNCTION Z_CDC_READ.
                   WHEN 'P'.
                     * Packed decimal with dot, no thousand separators
                     IF <fs_field> IS NOT INITIAL.
-                      WRITE <fs_field> TO lv_field_value NO-GROUPING.
+                      WRITE <fs_field> TO lv_field_value NO-GROUPING NO-SIGN.
+                      IF <fs_field> < 0.
+                        CONCATENATE '-' lv_field_value INTO lv_field_value.
+                      ENDIF.
                       REPLACE ALL OCCURRENCES OF ',' IN lv_field_value WITH '.'.
                       CONDENSE lv_field_value.
                       SHIFT lv_field_value LEFT DELETING LEADING SPACE.
@@ -325,7 +328,10 @@ FUNCTION Z_CDC_READ.
                   WHEN 'F'.
                     * Float with dot notation
                     IF <fs_field> IS NOT INITIAL.
-                      WRITE <fs_field> TO lv_field_value NO-GROUPING.
+                      WRITE <fs_field> TO lv_field_value NO-GROUPING NO-SIGN.
+                      IF <fs_field> < 0.
+                        CONCATENATE '-' lv_field_value INTO lv_field_value.
+                      ENDIF.
                       REPLACE ALL OCCURRENCES OF ',' IN lv_field_value WITH '.'.
                       CONDENSE lv_field_value.
                       SHIFT lv_field_value LEFT DELETING LEADING SPACE.

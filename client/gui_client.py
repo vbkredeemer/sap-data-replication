@@ -16,6 +16,8 @@ Features:
 Framework: PySide6 (Qt6, LGPL)
 """
 
+import copy
+import html as html_module
 import sys
 import json
 import os
@@ -81,7 +83,7 @@ class ConfigManager:
             app_dir = os.path.dirname(os.path.abspath(__file__))
             config_path = os.path.join(app_dir, "config.json")
         self.config_path = config_path
-        self.config = dict(DEFAULT_CONFIG)
+        self.config = copy.deepcopy(DEFAULT_CONFIG)
 
     def load(self) -> dict:
         if os.path.exists(self.config_path):
@@ -95,7 +97,7 @@ class ConfigManager:
                 self.config = loaded
             except Exception as e:
                 logging.error(f"Cannot load config: {e}")
-                self.config = dict(DEFAULT_CONFIG)
+                self.config = copy.deepcopy(DEFAULT_CONFIG)
         return self.config
 
     def save(self):
@@ -258,9 +260,11 @@ class SyncWorker(QThread):
             fail += 1
 
         finally:
-            sap_logger.removeHandler(handler)
-
-        self.finished_all.emit(success, fail)
+            try:
+                sap_logger.removeHandler(handler)
+            except Exception:
+                pass
+            self.finished_all.emit(success, fail)
 
 
 # ============================================================================
@@ -556,7 +560,7 @@ class TablesTab(QWidget):
 
         # Chunk size
         chunk_spin = QSpinBox()
-        chunk_spin.setRange(1000, 100000)
+        chunk_spin.setRange(1, 1000000)
         chunk_spin.setValue(t.get('chunk_size', 10000))
         chunk_spin.setSingleStep(1000)
         self.table.setCellWidget(row, 7, chunk_spin)
@@ -768,7 +772,7 @@ class RunTab(QWidget):
             'ERROR': '#CC0000',
             'DEBUG': '#888888'
         }.get(level, '#000000')
-        self.log_output.append(f'<span style="color:{color}">{message}</span>')
+        self.log_output.append(f'<span style="color:{color}">{html_module.escape(message)}</span>')
 
     def _set_progress(self, table_name: str, status: str):
         # Find or create row
@@ -889,8 +893,13 @@ class RunTab(QWidget):
     def _on_finished(self, success: int, fail: int):
         self._set_buttons_enabled(True)
         self._log("INFO", f"=== Sync abgeschlossen: {success} erfolgreich, {fail} fehlgeschlagen ===")
-        QMessageBox.information(self, "Fertig",
-            f"Sync abgeschlossen.\n{success} erfolgreich, {fail} fehlgeschlagen.")
+        # Only show modal dialog for manual syncs, not scheduler-triggered ones
+        if not getattr(self.worker, '_scheduler_triggered', False):
+            QMessageBox.information(self, "Fertig",
+                f"Sync abgeschlossen.\n{success} erfolgreich, {fail} fehlgeschlagen.")
+        else:
+            self.status_bar.showMessage(
+                f"Scheduler-Sync fertig: {success} OK, {fail} fehlgeschlagen", 10000)
 
 
 # ============================================================================
@@ -1197,7 +1206,7 @@ class ScheduleTab(QWidget):
                 # Find table config
                 table_cfg = None
                 for t in config.get('tables', []):
-                    if t['name'] == table:
+                    if t.get('name', '') == table:
                         table_cfg = t
                         break
 
@@ -1211,6 +1220,7 @@ class ScheduleTab(QWidget):
                             table_cfg = dict(table_cfg)
                             table_cfg['window'] = window
                         self.run_tab._start_worker([table_cfg], "sync")
+                        self.run_tab.worker._scheduler_triggered = True
                     elif action == 'sync_schema':
                         self.run_tab._start_worker([table_cfg], "sync_schema")
                     elif action == 'init_only':

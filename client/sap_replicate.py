@@ -292,7 +292,7 @@ class SchemaManager:
                 if len(parts) >= 2:
                     idx['fields'].append({
                         'fieldname': parts[0].strip(),
-                        'order': parts[1].strip().upper() if len(parts) > 1 else 'ASC',
+                        'order': 'DESC' if (parts[1].strip().upper() if len(parts) > 1 else 'A') == 'D' else 'ASC'
                     })
 
         # Also get primary key from DD03L
@@ -332,7 +332,7 @@ class SchemaManager:
         elif t in ('P', 'PACK'):
             # SAP PACK: INTLEN is bytes, each byte = 2 digits minus 1 sign nibble
             prec = max(length * 2 - 1, 1)
-            scale = max(int(length * 2 - 1 - decimals) if decimals else 0, 0)
+            scale = min(max(decimals, 0), prec)
             return f'DECIMAL({prec}, {scale})'
         elif t in ('F', 'FLTP'):
             return 'FLOAT(53)'
@@ -576,9 +576,8 @@ class CdcReplicator:
             values = parts[1:]
 
             if operation == 'D':
-                # DELETE — batch later
-                key_vals = values[:len(key_fields)]
-                deletes.append(key_vals)
+                # DELETE — store full values; key extraction by position later
+                deletes.append(values)
             elif operation in ('I', 'U'):
                 # INSERT or UPDATE (UPSERT via MERGE)
                 if len(values) >= len(col_names):
@@ -677,7 +676,7 @@ class CdcReplicator:
     def sync_table(self, table: str, key_fields: str, chunk_size: int = 10000):
         """Full sync cycle: init → read → apply → cleanup."""
         safe_table = _validate_table_name(table)
-        key_field_list = [k.strip() for k in key_fields.split(',')]
+        key_field_list = [_validate_field_name(k.strip()) for k in key_fields.split(',')]
 
         # Step 1: Init (check trigger, detect gaps)
         init_result = self.init_table(table, key_fields)
@@ -701,7 +700,8 @@ class CdcReplicator:
                 applied = self.apply_delta(table, rows, key_field_list)
                 total_rows += applied
                 log.info(f"  {table}: applied {applied} rows (total: {total_rows})")
-                max_seq = next_seq - 1
+                if next_seq > last_seq:
+                    max_seq = next_seq - 1
             last_seq = next_seq
             if not has_more:
                 break
@@ -1053,15 +1053,15 @@ class FlatfileReplicator:
             mssql_date_from = f"{date_from[:4]}-{date_from[4:6]}-{date_from[6:8]}"
             if date_to:
                 mssql_date_to = f"{date_to[:4]}-{date_to[4:6]}-{date_to[6:8]}"
-                log.info(f"  DELETE FROM dbo.[{target_table}] WHERE [{safe_date_field}] >= ? AND [{safe_date_field}] <= ?")
+                log.info(f"  DELETE FROM dbo.[{safe_target_tbl}] WHERE [{safe_date_field}] >= ? AND [{safe_date_field}] <= ?")
                 self.sql.execute(
-                    f"DELETE FROM dbo.[{target_table}] WHERE [{safe_date_field}] >= ? AND [{safe_date_field}] <= ?",
+                    f"DELETE FROM dbo.[{safe_target_tbl}] WHERE [{safe_date_field}] >= ? AND [{safe_date_field}] <= ?",
                     (mssql_date_from, mssql_date_to)
                 )
             else:
-                log.info(f"  DELETE FROM dbo.[{target_table}] WHERE [{safe_date_field}] >= ?")
+                log.info(f"  DELETE FROM dbo.[{safe_target_tbl}] WHERE [{safe_date_field}] >= ?")
                 self.sql.execute(
-                    f"DELETE FROM dbo.[{target_table}] WHERE [{safe_date_field}] >= ?",
+                    f"DELETE FROM dbo.[{safe_target_tbl}] WHERE [{safe_date_field}] >= ?",
                     (mssql_date_from,)
                 )
             self.sql.commit()
@@ -1204,7 +1204,10 @@ class FlatfileReplicator:
             log.info(f"  No data to transfer")
             # Still cleanup the empty file
             if cleanup_after and remote_file:
-                self.sap.call('Z_DELETE_FILE', IV_FILE_PATH=remote_file)
+                try:
+                    self.sap.call('Z_DELETE_FILE', IV_FILE_PATH=remote_file)
+                except Exception as e:
+                    log.warning(f"  Remote cleanup failed (empty file): {e}")
             return True
 
         # Step 2: Download file from SAP server
@@ -1337,11 +1340,11 @@ def main():
     # Connect
     sap = SapConnection(config['sap'])
     sql = SqlServerConnection(config['sql_server'])
-    state = StateManager(sql)
 
     try:
         sap.connect()
         sql.connect()
+        state = StateManager(sql)
 
         # Special commands
         if args.remove_cdc:
@@ -1390,8 +1393,14 @@ def main():
         log.info(f"=== Sync complete: {success_count} succeeded, {fail_count} failed ===")
 
     finally:
-        sap.close()
-        sql.close()
+        try:
+            sap.close()
+        except Exception:
+            pass
+        try:
+            sql.close()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

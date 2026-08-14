@@ -74,7 +74,7 @@ FUNCTION Z_EXPORT_TABLE.
   *---------------------------------------------------------------------
   * Build field list
   *---------------------------------------------------------------------
-  IF iv_fields IS INITIAL OR iv_fields = '*' OR iv_fields = ''.
+  IF iv_fields IS INITIAL OR iv_fields = '*'.
     lv_fields = '*'.
   ELSE.
     lv_fields = iv_fields.
@@ -281,6 +281,22 @@ FUNCTION Z_EXPORT_TABLE.
     ENDIF.
   ENDIF.
 
+  * Build field type map for conversion (before WHILE loop — static, no need to rebuild)
+  DATA: lt_type_map TYPE TABLE OF i,
+        lv_type_kind   TYPE abap_typekind,
+        lv_type_idx TYPE i.
+
+  LOOP AT lt_export_fields INTO lv_fieldname.
+    CONDENSE lv_fieldname.
+    READ TABLE lt_components INTO ls_component
+      WITH KEY name = lv_fieldname.
+    IF sy-subrc = 0.
+      APPEND ls_component-type_kind TO lt_type_map.
+    ELSE.
+      APPEND cl_abap_structdescr=>typekind_char TO lt_type_map.
+    ENDIF.
+  ENDLOOP.
+
   WHILE lv_done = abap_false.
 
     * Build keyset WHERE clause: use first non-MANDT PK field for keyset paging
@@ -372,22 +388,6 @@ FUNCTION Z_EXPORT_TABLE.
     *-------------------------------------------------------------------*
     * Write rows to CSV with type-aware conversion
     *-------------------------------------------------------------------*
-    * Build field type map for conversion
-    DATA: lt_type_map TYPE TABLE OF i,  " stores type_kind per field
-          lv_type_kind   TYPE abap_typekind,
-          lv_type_idx TYPE i.
-
-    LOOP AT lt_export_fields INTO lv_fieldname.
-      CONDENSE lv_fieldname.
-      READ TABLE lt_components INTO ls_component
-        WITH KEY name = lv_fieldname.
-      IF sy-subrc = 0.
-        APPEND ls_component-type_kind TO lt_type_map.
-      ELSE.
-        APPEND cl_abap_structdescr=>typekind_char TO lt_type_map.
-      ENDIF.
-    ENDLOOP.
-
     LOOP AT <ft_dynamic> ASSIGNING <fs_dynamic>.
       CLEAR lv_row.
       lv_type_idx = 0.
@@ -434,12 +434,12 @@ FUNCTION Z_EXPORT_TABLE.
             WHEN cl_abap_structdescr=>typekind_packed.
               * SAP PACKED: convert to decimal with dot, no thousand separators
               IF <ff_field> IS NOT INITIAL.
-                * Write with WRITE and EDIT MASK to get decimal notation
-                WRITE <ff_field> TO lv_char_val NO-GROUPING.
-                * Replace comma with dot (if German locale)
+                WRITE <ff_field> TO lv_char_val NO-GROUPING NO-SIGN.
+                IF <ff_field> < 0.
+                  CONCATENATE '-' lv_char_val INTO lv_char_val.
+                ENDIF.
                 REPLACE ALL OCCURRENCES OF ',' IN lv_char_val WITH '.'.
                 CONDENSE lv_char_val.
-                * Remove leading spaces
                 SHIFT lv_char_val LEFT DELETING LEADING SPACE.
               ENDIF.
 
@@ -453,7 +453,10 @@ FUNCTION Z_EXPORT_TABLE.
             WHEN cl_abap_structdescr=>typekind_float.
               * FLOAT — use scientific or decimal notation with dot
               IF <ff_field> IS NOT INITIAL.
-                WRITE <ff_field> TO lv_char_val NO-GROUPING.
+                WRITE <ff_field> TO lv_char_val NO-GROUPING NO-SIGN.
+                IF <ff_field> < 0.
+                  CONCATENATE '-' lv_char_val INTO lv_char_val.
+                ENDIF.
                 REPLACE ALL OCCURRENCES OF ',' IN lv_char_val WITH '.'.
                 CONDENSE lv_char_val.
                 SHIFT lv_char_val LEFT DELETING LEADING SPACE.

@@ -56,14 +56,9 @@ FUNCTION Z_CDC_INIT.
     RETURN.
   ENDIF.
 
-  *---------------------------------------------------------------------
+  *---------------------------------------------------------------------*
   * Validate inputs
-  *---------------------------------------------------------------------
-  IF iv_table IS INITIAL.
-    ev_error = 'IV_TABLE is empty'.
-    RETURN.
-  ENDIF.
-
+  *---------------------------------------------------------------------*
   IF iv_keyfields IS INITIAL.
     ev_error = 'IV_KEYFIELDS is empty — need at least one key field'.
     RETURN.
@@ -198,7 +193,7 @@ FUNCTION Z_CDC_INIT.
       ).
       lo_result->next( ).
       DATA(lv_val) = lo_result->get_char( ).
-      lv_trigger_count = lv_val.
+      lv_trigger_count = lo_result->get_int( ).
       lo_result->close( ).
     CATCH cx_root.
       * Cannot check — assume trigger doesn't exist
