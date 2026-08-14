@@ -47,9 +47,7 @@ FUNCTION Z_CDC_CLEANUP.
   ENDIF.
 
   * Validate table name — only alphanumeric and underscore allowed
-  DATA: lv_invalid_char TYPE i.
-  FIND REGEX '[^A-Za-z0-9_]' IN iv_table MATCH COUNT lv_invalid_char.
-  IF lv_invalid_char > 0.
+  IF iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
     ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
     RETURN.
   ENDIF.

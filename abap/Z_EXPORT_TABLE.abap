@@ -71,9 +71,7 @@ FUNCTION Z_EXPORT_TABLE.
     RETURN.
   ENDIF.
 
-  DATA: lv_invalid_char TYPE i.
-  FIND REGEX '[^A-Za-z0-9_]' IN iv_table MATCH COUNT lv_invalid_char.
-  IF lv_invalid_char > 0.
+  IF iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
     ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
     RETURN.
   ENDIF.
@@ -90,9 +88,7 @@ FUNCTION Z_EXPORT_TABLE.
   *---------------------------------------------------------------------
   * Validate date field name if provided
   IF iv_date_field IS NOT INITIAL.
-    DATA: lv_field_found TYPE i.
-    FIND REGEX '[^A-Za-z0-9_]' IN iv_date_field MATCH COUNT lv_field_found.
-    IF lv_field_found > 0.
+    IF iv_date_field CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
       ev_error = 'Invalid date field name: ' && iv_date_field.
       RETURN.
     ENDIF.
@@ -186,8 +182,7 @@ FUNCTION Z_EXPORT_TABLE.
   *---------------------------------------------------------------------*
   LOOP AT lt_export_fields INTO lv_fieldname.
     CONDENSE lv_fieldname.
-    FIND REGEX '[^A-Za-z0-9_]' IN lv_fieldname MATCH COUNT DATA(lv_bad_field).
-    IF lv_bad_field > 0.
+    IF lv_fieldname CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
       ev_error = 'Invalid field name (only A-Z, 0-9, underscore allowed): ' && lv_fieldname.
       RETURN.
     ENDIF.

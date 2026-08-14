@@ -49,9 +49,7 @@ FUNCTION Z_CDC_INIT.
          ev_last_log_seq, ev_last_log_time.
 
   * Validate table name — only alphanumeric and underscore allowed
-  DATA: lv_invalid_char TYPE i.
-  FIND REGEX '[^A-Za-z0-9_]' IN iv_table MATCH COUNT lv_invalid_char.
-  IF lv_invalid_char > 0 OR iv_table IS INITIAL.
+  IF iv_table IS INITIAL OR iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
     ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
     RETURN.
   ENDIF.
@@ -234,8 +232,7 @@ FUNCTION Z_CDC_INIT.
   * Build new-row key expression
   LOOP AT lt_keyfields INTO lv_key.
     CONDENSE lv_key.
-    FIND REGEX '[^A-Za-z0-9_]' IN lv_key MATCH COUNT DATA(lv_bad_key).
-    IF lv_bad_key > 0.
+    IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
       ev_error = 'Invalid key field name (only A-Z, 0-9, underscore allowed): ' && lv_key.
       RETURN.
     ENDIF.
@@ -249,8 +246,7 @@ FUNCTION Z_CDC_INIT.
   * Build old-row key expression (for DELETE trigger)
   LOOP AT lt_keyfields INTO lv_key.
     CONDENSE lv_key.
-    FIND REGEX '[^A-Za-z0-9_]' IN lv_key MATCH COUNT DATA(lv_bad_key2).
-    IF lv_bad_key2 > 0.
+    IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
       ev_error = 'Invalid key field name (only A-Z, 0-9, underscore allowed): ' && lv_key.
       RETURN.
     ENDIF.
