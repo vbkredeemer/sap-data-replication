@@ -48,32 +48,32 @@ FUNCTION Z_CDC_INIT.
   CLEAR: ev_error, ev_log_table, ev_trigger_exists, ev_gap_detected,
          ev_last_log_seq, ev_last_log_time.
 
-  * Validate table name — only alphanumeric and underscore allowed
+  " Validate table name — only alphanumeric and underscore allowed
   IF iv_table IS INITIAL OR iv_table CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
     ev_error = 'Invalid table name (only A-Z, 0-9, underscore allowed): ' && iv_table.
     RETURN.
   ENDIF.
 
-  *---------------------------------------------------------------------*
-  * Validate inputs
-  *---------------------------------------------------------------------*
+  "---------------------------------------------------------------------*
+  " Validate inputs
+  "---------------------------------------------------------------------*
   IF iv_keyfields IS INITIAL.
     ev_error = 'IV_KEYFIELDS is empty — need at least one key field'.
     RETURN.
   ENDIF.
 
-  *---------------------------------------------------------------------*
-  * Build names
-  * HANA trigger names max 32 chars — hash if too long
-  *---------------------------------------------------------------------*
+  "---------------------------------------------------------------------*
+  " Build names
+  " HANA trigger names max 32 chars — hash if too long
+  "---------------------------------------------------------------------*
   DATA: lv_tab_len TYPE i,
         lv_hash    TYPE i.
 
   lv_tab_len = strlen( iv_table ).
 
   IF lv_tab_len > 18.
-    * Table name too long — use hash to keep trigger name < 32 chars
-    * Z_ + hash(6) + _CDC_TRG_INS = 3+6+13 = 22 chars (safe)
+    " Table name too long — use hash to keep trigger name < 32 chars
+    " Z_ + hash(6) + _CDC_TRG_INS = 3+6+13 = 22 chars (safe)
     CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
       EXPORTING
         data = iv_table
@@ -97,21 +97,21 @@ FUNCTION Z_CDC_INIT.
 
   ev_log_table = lv_log_table.
 
-  *---------------------------------------------------------------------
-  * Check if log table exists (via dynamic SELECT)
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Check if log table exists (via dynamic SELECT)
+  "---------------------------------------------------------------------
   TRY.
       SELECT COUNT(*) FROM (lv_log_table) INTO lv_exists.
     CATCH cx_root.
       lv_exists = 0.
   ENDTRY.
 
-  *---------------------------------------------------------------------
-  * Create log table if it doesn't exist
-  * We use ADBC to execute DDL on HANA
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Create log table if it doesn't exist
+  " We use ADBC to execute DDL on HANA
+  "---------------------------------------------------------------------
   IF lv_exists = 0.
-    * Create sequence for auto-increment
+    " Create sequence for auto-increment
     CONCATENATE 'CREATE SEQUENCE ' lv_seq_name
                 ' START WITH 1 INCREMENT BY 1 NO CACHE'
                 INTO lv_sql SEPARATED BY space.
@@ -120,10 +120,10 @@ FUNCTION Z_CDC_INIT.
         DATA(lo_sql) = NEW cl_sql_statement( ).
         lo_sql->execute_ddl( lv_sql ).
       CATCH cx_root INTO DATA(lo_cx).
-        * Sequence might already exist — ignore
+        " Sequence might already exist — ignore
     ENDTRY.
 
-    * Create log table via ADBC (HANA DDL)
+    " Create log table via ADBC (HANA DDL)
     CONCATENATE 'CREATE COLUMN TABLE ' lv_log_table ' ('
                 ' SEQ INTEGER NOT NULL,'
                 ' OPERATION VARCHAR(1) NOT NULL,'
@@ -142,10 +142,10 @@ FUNCTION Z_CDC_INIT.
     ENDTRY.
   ENDIF.
 
-  *---------------------------------------------------------------------*
-  * Check if last log entry is old (gap detection)
-  * Only flag gap if trigger is MISSING and log has entries
-  *---------------------------------------------------------------------*
+  "---------------------------------------------------------------------*
+  " Check if last log entry is old (gap detection)
+  " Only flag gap if trigger is MISSING and log has entries
+  "---------------------------------------------------------------------*
   TRY.
       SELECT MAX( seq ) FROM (lv_log_table) INTO lv_last_seq.
       IF lv_last_seq > 0.
@@ -154,7 +154,7 @@ FUNCTION Z_CDC_INIT.
         ev_last_log_seq = lv_last_seq.
         ev_last_log_time = lv_last_time.
 
-        * Calculate age in hours using cl_abap_tstmp (7.00+ compatible)
+        " Calculate age in hours using cl_abap_tstmp (7.00+ compatible)
         DATA: lv_now_tstmp TYPE timestampl.
         GET TIME STAMP FIELD lv_now_tstmp.
         TRY.
@@ -163,23 +163,23 @@ FUNCTION Z_CDC_INIT.
               tstmp2 = lv_last_time ).
             lv_age_hours = lv_diff_secs / 3600.
           CATCH cx_root.
-            * Cannot calculate — don't flag gap
+            " Cannot calculate — don't flag gap
             lv_age_hours = 0.
         ENDTRY.
 
-        * Gap is only suspicious if:
-        *   1. The trigger is missing (checked below)
-        *   2. The last log entry is older than threshold
-        * We store the age but only set EV_GAP_DETECTED after checking trigger
+        " Gap is only suspicious if:
+        "   1. The trigger is missing (checked below)
+        "   2. The last log entry is older than threshold
+        " We store the age but only set EV_GAP_DETECTED after checking trigger
       ENDIF.
     CATCH cx_root.
-      * Log table empty or error — no gap
+      " Log table empty or error — no gap
   ENDTRY.
 
-  *---------------------------------------------------------------------*
-  * Check if trigger exists (HANA system table)
-  * Search for the INSERT trigger (sufficient — all three are created together)
-  *---------------------------------------------------------------------*
+  "---------------------------------------------------------------------*
+  " Check if trigger exists (HANA system table)
+  " Search for the INSERT trigger (sufficient — all three are created together)
+  "---------------------------------------------------------------------*
   DATA: lv_trigger_count TYPE i.
   DATA: lv_trigger_full TYPE string.
   CONCATENATE lv_trigger_name '_INS' INTO lv_trigger_full.
@@ -193,34 +193,34 @@ FUNCTION Z_CDC_INIT.
       lv_trigger_count = lo_result->get_int( ).
       lo_result->close( ).
     CATCH cx_root.
-      * Cannot check — assume trigger doesn't exist
+      " Cannot check — assume trigger doesn't exist
       lv_trigger_count = 0.
   ENDTRY.
 
   IF lv_trigger_count > 0.
     ev_trigger_exists = 'X'.
-    * Trigger exists — no gap even if log is old
+    " Trigger exists — no gap even if log is old
     RETURN.
   ENDIF.
 
-  *---------------------------------------------------------------------*
-  * Trigger does NOT exist — check if there's a gap
-  * A gap is only detected if:
-  *   - Log table has entries (lv_last_seq > 0)
-  *   - AND last entry is older than threshold (default 24h)
-  *   - AND trigger is missing (we're here because it's missing)
-  *---------------------------------------------------------------------*
+  "---------------------------------------------------------------------*
+  " Trigger does NOT exist — check if there's a gap
+  " A gap is only detected if:
+  "   - Log table has entries (lv_last_seq > 0)
+  "   - AND last entry is older than threshold (default 24h)
+  "   - AND trigger is missing (we're here because it's missing)
+  "---------------------------------------------------------------------*
   IF lv_last_seq > 0 AND lv_age_hours > iv_gap_threshold_hours.
     ev_gap_detected = 'X'.
   ENDIF.
 
-  *---------------------------------------------------------------------
-  * Create triggers (INSERT, UPDATE, DELETE)
-  * Log only the key fields + operation, not the full row
-  *---------------------------------------------------------------------
-  * Build the key extraction expression for the trigger
-  * For single key: :new_row.MATNR
-  * For composite key: :new_row.MANDT || '|' || :new_row.MATNR
+  "---------------------------------------------------------------------
+  " Create triggers (INSERT, UPDATE, DELETE)
+  " Log only the key fields + operation, not the full row
+  "---------------------------------------------------------------------
+  " Build the key extraction expression for the trigger
+  " For single key: :new_row.MATNR
+  " For composite key: :new_row.MANDT || '|' || :new_row.MATNR
 
   DATA: lt_keyfields TYPE TABLE OF string,
         lv_key        TYPE string,
@@ -229,7 +229,7 @@ FUNCTION Z_CDC_INIT.
 
   SPLIT iv_keyfields AT ',' INTO TABLE lt_keyfields.
 
-  * Build new-row key expression
+  " Build new-row key expression
   LOOP AT lt_keyfields INTO lv_key.
     CONDENSE lv_key.
     IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
@@ -243,7 +243,7 @@ FUNCTION Z_CDC_INIT.
     ENDIF.
   ENDLOOP.
 
-  * Build old-row key expression (for DELETE trigger)
+  " Build old-row key expression (for DELETE trigger)
   LOOP AT lt_keyfields INTO lv_key.
     CONDENSE lv_key.
     IF lv_key CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
@@ -257,9 +257,9 @@ FUNCTION Z_CDC_INIT.
     ENDIF.
   ENDLOOP.
 
-  *---------------------------------------------------------------------
-  * Create INSERT trigger
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Create INSERT trigger
+  "---------------------------------------------------------------------
   CONCATENATE 'CREATE TRIGGER ' lv_trigger_name '_INS '
               'AFTER INSERT ON ' iv_table ' '
               'REFERENCING NEW ROW AS new_row '
@@ -279,9 +279,9 @@ FUNCTION Z_CDC_INIT.
       RETURN.
   ENDTRY.
 
-  *---------------------------------------------------------------------
-  * Create UPDATE trigger
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Create UPDATE trigger
+  "---------------------------------------------------------------------
   CONCATENATE 'CREATE TRIGGER ' lv_trigger_name '_UPD '
               'AFTER UPDATE ON ' iv_table ' '
               'REFERENCING NEW ROW AS new_row '
@@ -301,9 +301,9 @@ FUNCTION Z_CDC_INIT.
       RETURN.
   ENDTRY.
 
-  *---------------------------------------------------------------------
-  * Create DELETE trigger
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Create DELETE trigger
+  "---------------------------------------------------------------------
   CONCATENATE 'CREATE TRIGGER ' lv_trigger_name '_DEL '
               'AFTER DELETE ON ' iv_table ' '
               'REFERENCING OLD ROW AS old_row '
@@ -323,8 +323,8 @@ FUNCTION Z_CDC_INIT.
       RETURN.
   ENDTRY.
 
-  *---------------------------------------------------------------------*
-  * Success — triggers created
-  *---------------------------------------------------------------------*
+  "---------------------------------------------------------------------*
+  " Success — triggers created
+  "---------------------------------------------------------------------*
 
 ENDFUNCTION.

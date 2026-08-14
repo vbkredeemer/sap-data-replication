@@ -63,9 +63,9 @@ FUNCTION Z_EXPORT_TABLE.
 
   CLEAR: ev_error, ev_file_name, ev_row_count, ev_file_size.
 
-  *---------------------------------------------------------------------
-  * Validate inputs
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Validate inputs
+  "---------------------------------------------------------------------
   IF iv_table IS INITIAL.
     ev_error = 'IV_TABLE is empty'.
     RETURN.
@@ -76,17 +76,17 @@ FUNCTION Z_EXPORT_TABLE.
     RETURN.
   ENDIF.
 
-  *---------------------------------------------------------------------
-  * Build field list
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Build field list
+  "---------------------------------------------------------------------
   IF iv_fields IS INITIAL OR iv_fields = '*'.
     lv_fields = '*'.
   ELSE.
     lv_fields = iv_fields.
   ENDIF.
 
-  *---------------------------------------------------------------------
-  * Validate date field name if provided
+  "---------------------------------------------------------------------
+  " Validate date field name if provided
   IF iv_date_field IS NOT INITIAL.
     IF iv_date_field CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
       ev_error = 'Invalid date field name: ' && iv_date_field.
@@ -94,8 +94,8 @@ FUNCTION Z_EXPORT_TABLE.
     ENDIF.
   ENDIF.
 
-  * Build WHERE clause for date filter
-  *---------------------------------------------------------------------
+  " Build WHERE clause for date filter
+  "---------------------------------------------------------------------
   CLEAR lv_where.
 
   IF iv_date_field IS NOT INITIAL.
@@ -112,17 +112,17 @@ FUNCTION Z_EXPORT_TABLE.
     ENDIF.
   ENDIF.
 
-  *---------------------------------------------------------------------
-  * Build file path
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Build file path
+  "---------------------------------------------------------------------
   IF iv_file_path IS INITIAL.
-    * Default: SAP temp directory
+    " Default: SAP temp directory
     lv_file = '/usr/sap/tmp/'.
   ELSE.
     lv_file = iv_file_path.
   ENDIF.
 
-  * Ensure trailing slash
+  " Ensure trailing slash
   DATA: lv_file_len TYPE i.
   lv_file_len = strlen( lv_file ).
   IF lv_file_len > 0 AND lv_file+lv_file_len-1(1) <> '/'.
@@ -131,7 +131,7 @@ FUNCTION Z_EXPORT_TABLE.
     lv_file = '/usr/sap/tmp/'.
   ENDIF.
 
-  * Build filename: TABLE_YYYYMMDD_HHMMSS.csv
+  " Build filename: TABLE_YYYYMMDD_HHMMSS.csv
   GET TIME STAMP FIELD DATA(lv_ts).
   CONVERT TIME STAMP lv_ts TIME ZONE sy-zonlo INTO DATE DATA(lv_date) TIME DATA(lv_time).
 
@@ -144,9 +144,9 @@ FUNCTION Z_EXPORT_TABLE.
               INTO lv_filename.
   CONCATENATE lv_file lv_filename INTO ev_file_name.
 
-  *---------------------------------------------------------------------
-  * Get table metadata via RTTS
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Get table metadata via RTTS
+  "---------------------------------------------------------------------
   DATA: lo_struct_descr TYPE REF TO cl_abap_structdescr,
         lt_components   TYPE cl_abap_structdescr=>component_table,
         ls_component    TYPE abap_componentdescr.
@@ -160,9 +160,9 @@ FUNCTION Z_EXPORT_TABLE.
 
   lt_components = lo_struct_descr->get_components( ).
 
-  *---------------------------------------------------------------------
-  * Determine which fields to export
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Determine which fields to export
+  "---------------------------------------------------------------------
   DATA: lt_export_fields TYPE TABLE OF string,
         lv_all_fields    TYPE abap_bool,
         lv_fieldname     TYPE string.
@@ -177,9 +177,9 @@ FUNCTION Z_EXPORT_TABLE.
     SPLIT lv_fields AT ',' INTO TABLE lt_export_fields.
   ENDIF.
 
-  *---------------------------------------------------------------------*
-  * Validate field names — only alphanumeric and underscore allowed
-  *---------------------------------------------------------------------*
+  "---------------------------------------------------------------------*
+  " Validate field names — only alphanumeric and underscore allowed
+  "---------------------------------------------------------------------*
   LOOP AT lt_export_fields INTO lv_fieldname.
     CONDENSE lv_fieldname.
     IF lv_fieldname CN 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_' <> 0.
@@ -188,9 +188,9 @@ FUNCTION Z_EXPORT_TABLE.
     ENDIF.
   ENDLOOP.
 
-  *---------------------------------------------------------------------
-  * Build CSV header line
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Build CSV header line
+  "---------------------------------------------------------------------
   CLEAR lv_header.
   LOOP AT lt_export_fields INTO lv_fieldname.
     CONDENSE lv_fieldname.
@@ -201,9 +201,9 @@ FUNCTION Z_EXPORT_TABLE.
     ENDIF.
   ENDLOOP.
 
-  *---------------------------------------------------------------------
-  * Open file for writing
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Open file for writing
+  "---------------------------------------------------------------------
   TRY.
       OPEN DATASET ev_file_name FOR OUTPUT IN TEXT MODE ENCODING DEFAULT.
     CATCH cx_root INTO DATA(lo_cx_open).
@@ -211,9 +211,9 @@ FUNCTION Z_EXPORT_TABLE.
       RETURN.
   ENDTRY.
 
-  *---------------------------------------------------------------------
-  * Write header line
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Write header line
+  "---------------------------------------------------------------------
   TRY.
       TRANSFER lv_header TO ev_file_name.
       lv_size = strlen( lv_header ) + 2.
@@ -223,9 +223,9 @@ FUNCTION Z_EXPORT_TABLE.
       RETURN.
   ENDTRY.
 
-  *---------------------------------------------------------------------
-  * Build dynamic SELECT and fetch data in blocks
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Build dynamic SELECT and fetch data in blocks
+  "---------------------------------------------------------------------
   DATA: lo_table_descr TYPE REF TO cl_abap_tabledescr,
         lo_data_ref    TYPE REF TO data,
         lt_dynamic     TYPE REF TO data,
@@ -241,16 +241,16 @@ FUNCTION Z_EXPORT_TABLE.
 
   ASSIGN lt_dynamic->* TO <ft_dynamic>.
 
-  *---------------------------------------------------------------------*
-  * Execute SELECT in blocks of 50000 rows for memory efficiency
-  * Uses keyset paging: after each block, remember the last key value
-  * and fetch the next block with WHERE key > last_key
-  *---------------------------------------------------------------------*
+  "---------------------------------------------------------------------*
+  " Execute SELECT in blocks of 50000 rows for memory efficiency
+  " Uses keyset paging: after each block, remember the last key value
+  " and fetch the next block with WHERE key > last_key
+  "---------------------------------------------------------------------*
   DATA: lv_block_size TYPE i VALUE 50000,
         lv_total       TYPE i VALUE 0,
         lv_done        TYPE abap_bool VALUE abap_false.
 
-  * Get primary key fields for keyset paging
+  " Get primary key fields for keyset paging
   DATA: lt_pk_fields TYPE TABLE OF dfies,
         ls_pk_field  TYPE dfies,
         lv_pk_where  TYPE string,
@@ -267,7 +267,7 @@ FUNCTION Z_EXPORT_TABLE.
 
   DELETE lt_pk_fields WHERE keyflag <> 'X'.
 
-  * Build field list for SELECT (same as export fields, comma-separated)
+  " Build field list for SELECT (same as export fields, comma-separated)
   DATA: lv_select_fields TYPE string.
   IF lv_all_fields = abap_true.
     lv_select_fields = '*'.
@@ -275,10 +275,10 @@ FUNCTION Z_EXPORT_TABLE.
     lv_select_fields = lv_fields.
   ENDIF.
 
-  * Build ORDER BY clause for keyset paging (first non-MANDT PK field)
+  " Build ORDER BY clause for keyset paging (first non-MANDT PK field)
   DATA: lv_orderby TYPE string.
   IF lines( lt_pk_fields ) > 0.
-    * Skip MANDT — use first non-client PK field for keyset paging
+    " Skip MANDT — use first non-client PK field for keyset paging
     LOOP AT lt_pk_fields INTO ls_pk_field.
       IF ls_pk_field-fieldname <> 'MANDT'.
         lv_orderby = ls_pk_field-fieldname.
@@ -287,7 +287,7 @@ FUNCTION Z_EXPORT_TABLE.
     ENDLOOP.
   ENDIF.
 
-  * If no PK found (or only MANDT), use first field from components as fallback
+  " If no PK found (or only MANDT), use first field from components as fallback
   IF lv_orderby IS INITIAL.
     READ TABLE lt_components INTO ls_component INDEX 1.
     IF sy-subrc = 0.
@@ -299,7 +299,7 @@ FUNCTION Z_EXPORT_TABLE.
     lv_orderby = '1'.
   ENDIF.
 
-  * Build field type map for conversion (before WHILE loop — static, no need to rebuild)
+  " Build field type map for conversion (before WHILE loop — static, no need to rebuild)
   DATA: lt_type_map TYPE TABLE OF i,
         lv_type_kind   TYPE abap_typekind,
         lv_type_idx TYPE i.
@@ -317,10 +317,10 @@ FUNCTION Z_EXPORT_TABLE.
 
   WHILE lv_done = abap_false.
 
-    * Build keyset WHERE clause: use first non-MANDT PK field for keyset paging
+    " Build keyset WHERE clause: use first non-MANDT PK field for keyset paging
     CLEAR lv_pk_where.
     IF lv_first_block = abap_false AND lv_last_key IS NOT INITIAL AND lines( lt_pk_fields ) > 0.
-      * Find first non-MANDT PK field for keyset paging
+      " Find first non-MANDT PK field for keyset paging
       DATA: lv_keyset_field TYPE dfies.
       LOOP AT lt_pk_fields INTO ls_pk_field.
         IF ls_pk_field-fieldname <> 'MANDT'.
@@ -342,7 +342,7 @@ FUNCTION Z_EXPORT_TABLE.
       lv_pk_where = lv_where.
     ENDIF.
 
-    * Build and execute dynamic SELECT
+    " Build and execute dynamic SELECT
     TRY.
         IF lv_pk_where IS NOT INITIAL.
           IF iv_max_rows > 0.
@@ -397,15 +397,15 @@ FUNCTION Z_EXPORT_TABLE.
         RETURN.
     ENDTRY.
 
-    * Check if we got any data
+    " Check if we got any data
     IF lines( <ft_dynamic> ) = 0.
       lv_done = abap_true.
       EXIT.
     ENDIF.
 
-    *-------------------------------------------------------------------*
-    * Write rows to CSV with type-aware conversion
-    *-------------------------------------------------------------------*
+    "-------------------------------------------------------------------*
+    " Write rows to CSV with type-aware conversion
+    "-------------------------------------------------------------------*
     LOOP AT <ft_dynamic> ASSIGNING <fs_dynamic>.
       CLEAR lv_row.
       lv_type_idx = 0.
@@ -415,18 +415,18 @@ FUNCTION Z_EXPORT_TABLE.
         lv_type_idx = lv_type_idx + 1.
         ASSIGN COMPONENT lv_fieldname OF STRUCTURE <fs_dynamic> TO <ff_field>.
         IF sy-subrc = 0.
-          * Get type kind for this field
+          " Get type kind for this field
           READ TABLE lt_type_map INTO lv_type_kind INDEX lv_type_idx.
           IF sy-subrc <> 0.
             lv_type_kind = cl_abap_structdescr=>typekind_char.
           ENDIF.
 
-          * Type-aware conversion to MSSQL-compatible format
+          " Type-aware conversion to MSSQL-compatible format
           CLEAR lv_char_val.
 
           CASE lv_type_kind.
             WHEN cl_abap_structdescr=>typekind_date.
-              * SAP DATE: YYYYMMDD → MSSQL: YYYY-MM-DD
+              " SAP DATE: YYYYMMDD → MSSQL: YYYY-MM-DD
               IF <ff_field> IS NOT INITIAL.
                 lv_date_str = |{ <ff_field> }|.
                 IF strlen( lv_date_str ) = 8.
@@ -438,7 +438,7 @@ FUNCTION Z_EXPORT_TABLE.
               ENDIF.
 
             WHEN cl_abap_structdescr=>typekind_time.
-              * SAP TIME: HHMMSS → MSSQL: HH:MM:SS
+              " SAP TIME: HHMMSS → MSSQL: HH:MM:SS
               IF <ff_field> IS NOT INITIAL.
                 lv_time_str = |{ <ff_field> }|.
                 IF strlen( lv_time_str ) = 6.
@@ -450,7 +450,7 @@ FUNCTION Z_EXPORT_TABLE.
               ENDIF.
 
             WHEN cl_abap_structdescr=>typekind_packed.
-              * SAP PACKED: convert to decimal with dot, no thousand separators
+              " SAP PACKED: convert to decimal with dot, no thousand separators
               IF <ff_field> IS NOT INITIAL.
                 WRITE <ff_field> TO lv_char_val NO-GROUPING NO-SIGN.
                 IF <ff_field> < 0.
@@ -464,12 +464,12 @@ FUNCTION Z_EXPORT_TABLE.
             WHEN cl_abap_structdescr=>typekind_int
               OR cl_abap_structdescr=>typekind_int2
               OR cl_abap_structdescr=>typekind_int1.
-              * Integer — plain number
+              " Integer — plain number
               lv_char_val = |{ <ff_field> }|.
               CONDENSE lv_char_val.
 
             WHEN cl_abap_structdescr=>typekind_float.
-              * FLOAT — use scientific or decimal notation with dot
+              " FLOAT — use scientific or decimal notation with dot
               IF <ff_field> IS NOT INITIAL.
                 WRITE <ff_field> TO lv_char_val NO-GROUPING NO-SIGN.
                 IF <ff_field> < 0.
@@ -481,20 +481,20 @@ FUNCTION Z_EXPORT_TABLE.
               ENDIF.
 
             WHEN cl_abap_structdescr=>typekind_hex.
-              * RAW — convert to hex string with 0x prefix for MSSQL VARBINARY
+              " RAW — convert to hex string with 0x prefix for MSSQL VARBINARY
               DATA(lv_hex_str) = |{ <ff_field> }|.
               CONCATENATE '0x' lv_hex_str INTO lv_char_val.
 
             WHEN cl_abap_structdescr=>typekind_char
               OR cl_abap_structdescr=>typekind_string.
-              * CHAR/STRING — as-is, but remove trailing spaces
+              " CHAR/STRING — as-is, but remove trailing spaces
               lv_char_val = |{ <ff_field> }|.
-              * Don't CONDENSE — preserves internal spaces, only removes trailing
+              " Don't CONDENSE — preserves internal spaces, only removes trailing
               SHIFT lv_char_val RIGHT DELETING TRAILING space.
               SHIFT lv_char_val LEFT DELETING LEADING space.
 
             WHEN OTHERS.
-              * Fallback: plain string conversion
+              " Fallback: plain string conversion
               lv_char_val = |{ <ff_field> }|.
               CONDENSE lv_char_val.
           ENDCASE.
@@ -505,7 +505,7 @@ FUNCTION Z_EXPORT_TABLE.
             CONCATENATE lv_row lv_char_val INTO lv_row SEPARATED BY '|'.
           ENDIF.
         ELSE.
-          * Field not found — empty value
+          " Field not found — empty value
           IF lv_row IS INITIAL.
             lv_row = ''.
           ELSE.
@@ -525,12 +525,12 @@ FUNCTION Z_EXPORT_TABLE.
       ENDTRY.
     ENDLOOP.
 
-    * Check if we fetched less than block size — means we're done
+    " Check if we fetched less than block size — means we're done
     IF lines( <ft_dynamic> ) < lv_block_size.
       lv_done = abap_true.
     ENDIF.
 
-    * Remember last key for keyset paging (first non-MANDT PK field)
+    " Remember last key for keyset paging (first non-MANDT PK field)
     IF lv_done = abap_false AND lines( lt_pk_fields ) > 0.
       DATA: lv_keyset_track TYPE dfies.
       LOOP AT lt_pk_fields INTO ls_pk_field.
@@ -547,7 +547,7 @@ FUNCTION Z_EXPORT_TABLE.
           IF sy-subrc = 0.
             lv_last_key = |{ <ff_field> }|.
             CONDENSE lv_last_key.
-            * Escape single quotes for next iteration's WHERE clause
+            " Escape single quotes for next iteration's WHERE clause
             REPLACE ALL OCCURRENCES OF '''' IN lv_last_key WITH ''''''.
           ENDIF.
         ENDIF.
@@ -556,24 +556,24 @@ FUNCTION Z_EXPORT_TABLE.
 
     lv_first_block = abap_false.
 
-    * Check max rows
+    " Check max rows
     IF iv_max_rows > 0 AND lv_total >= iv_max_rows.
       lv_done = abap_true.
     ENDIF.
 
-    * Clear table for next block
+    " Clear table for next block
     CLEAR <ft_dynamic>.
 
   ENDWHILE.
 
-  *---------------------------------------------------------------------
-  * Close file
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Close file
+  "---------------------------------------------------------------------
   CLOSE DATASET ev_file_name.
 
-  *---------------------------------------------------------------------
-  * Set return values
-  *---------------------------------------------------------------------
+  "---------------------------------------------------------------------
+  " Set return values
+  "---------------------------------------------------------------------
   ev_row_count = lv_total.
   ev_file_size = lv_size.
 
