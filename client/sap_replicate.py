@@ -85,6 +85,65 @@ def _validate_field_name(name: str) -> str:
     return name
 
 
+def _normalize_field_list(fields: str) -> str:
+    """Normalize a comma-separated field list for SAP RFC calls.
+
+    Removes spaces around commas and trims each field name.
+    Example: 'MATNR, ERNAM, MTART' → 'MATNR,ERNAM,MTART'
+    This prevents ABAP dynamic SELECT from misinterpreting field names
+    when spaces are present after commas.
+    """
+    if not fields or fields.strip() == '*':
+        return '*'
+    parts = [f.strip() for f in fields.split(',')]
+    parts = [p for p in parts if p]  # remove empty entries
+    return ','.join(parts)
+
+
+def _parse_rowdata(rowdata: str, expected_count: int = None,
+                   context: str = '') -> list:
+    """Parse a pipe-delimited ROWDATA string from SAP RFC.
+
+    - Splits by '|'
+    - Strips trailing spaces from each value (SAP CHAR fields are
+      blank-padded to the field length)
+    - Validates against expected_count if provided
+    - Pads with None or truncates with a warning log on mismatch
+
+    Args:
+        rowdata: The ROWDATA string from ET_DATA
+        expected_count: Expected number of fields (from ET_FIELDS or MSSQL)
+        context: Description for warning messages (e.g. table name)
+
+    Returns:
+        List of string values (stripped of trailing spaces)
+    """
+    values = [v.rstrip() for v in rowdata.split('|')]
+
+    if expected_count is not None and len(values) != expected_count:
+        if len(values) < expected_count:
+            log.warning(
+                f"  {context}: ROWDATA has {len(values)} fields, "
+                f"expected {expected_count} — padding with NULL")
+            values.extend([None] * (expected_count - len(values)))
+        else:
+            log.warning(
+                f"  {context}: ROWDATA has {len(values)} fields, "
+                f"expected {expected_count} — truncating")
+            values = values[:expected_count]
+
+    return values
+
+
+def _get_sap_field_names(et_fields: list) -> list:
+    """Extract field names from SAP ET_FIELDS metadata.
+
+    ET_FIELDS is a table of ZSQL_FIELD structures with 'FIELDNAME' key.
+    Returns ordered list of field names as SAP sees them.
+    """
+    return [f['FIELDNAME'] for f in et_fields]
+
+
 # ============================================================================
 # Helpers — shared window range calculation
 # ============================================================================
@@ -584,7 +643,10 @@ class CdcReplicator:
         deletes = []
 
         for rowdata in rows:
-            parts = rowdata.split('|')
+            # Use _parse_rowdata for trailing space trimming (SAP CHAR fields
+            # are blank-padded). expected_count=None since CDC rows have
+            # OPERATION prefix + variable field count.
+            parts = _parse_rowdata(rowdata, context=table)
             operation = parts[0]
             values = parts[1:]
 
@@ -807,8 +869,10 @@ class TimeframeReplicator:
         total_rows = 0
         skip = 0
 
-        # Get column metadata from first chunk
+        # Column metadata: prefer SAP ET_FIELDS (authoritative) over MSSQL
+        sap_field_names = None
         col_names = None
+        expected_cols = None
 
         while True:
             result = self.sap.call('Z_READ_TABLE',
@@ -827,19 +891,37 @@ class TimeframeReplicator:
             if not data_rows:
                 break
 
-            # Get column names from target table (first call)
+            # Get column names: prefer SAP ET_FIELDS metadata (authoritative)
             if col_names is None:
-                cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.[{safe_table}]")
+                et_fields = result.get('ET_FIELDS', [])
+                if et_fields:
+                    sap_field_names = _get_sap_field_names(et_fields)
+                    log.info(f"  SAP ET_FIELDS returned {len(sap_field_names)} fields")
+                # Fallback: get column names from target MSSQL table
+                cursor = self.sql.execute(
+                    f"SELECT TOP 0 * FROM dbo.[{safe_table}]")
                 col_names = [desc[0] for desc in cursor.description]
 
-            # Build INSERT batch
+                # Use SAP field count for parsing (authoritative from Z_READ_TABLE)
+                if sap_field_names:
+                    if len(sap_field_names) != len(col_names):
+                        log.warning(
+                            f"  {table}: SAP ET_FIELDS has {len(sap_field_names)} fields "
+                            f"but MSSQL table has {len(col_names)} columns -- "
+                            f"using SAP field count for ROWDATA parsing")
+                    expected_cols = len(sap_field_names)
+                else:
+                    expected_cols = len(col_names)
+
+            # Build INSERT batch using _parse_rowdata for trailing space trimming
             placeholders = ','.join(['?'] * len(col_names))
             col_list = ','.join(f"[{c}]" for c in col_names)
             insert_sql = f"INSERT INTO dbo.[{safe_table}] ({col_list}) VALUES ({placeholders})"
 
             batch = []
             for row in data_rows:
-                values = row['ROWDATA'].split('|')
+                values = _parse_rowdata(row['ROWDATA'], expected_cols, table)
+                # Map SAP field count to MSSQL column count
                 if len(values) >= len(col_names):
                     vals = values[:len(col_names)]
                 else:
@@ -856,7 +938,7 @@ class TimeframeReplicator:
             if result.get('EV_HAS_MORE') != 'X':
                 break
 
-        log.info(f"TIMEFRAME sync complete: {table} — {total_rows} rows loaded")
+        log.info(f"TIMEFRAME sync complete: {table} -- {total_rows} rows loaded")
         return True
 
 
@@ -885,6 +967,8 @@ class FullLoadReplicator:
         total_rows = 0
         skip = 0
         col_names = None
+        sap_field_names = None
+        expected_cols = None
 
         while True:
             result = self.sap.call('Z_READ_TABLE',
@@ -904,8 +988,24 @@ class FullLoadReplicator:
                 break
 
             if col_names is None:
-                cursor = self.sql.execute(f"SELECT TOP 0 * FROM dbo.[{safe_table}]")
+                et_fields = result.get('ET_FIELDS', [])
+                if et_fields:
+                    sap_field_names = _get_sap_field_names(et_fields)
+                    log.info(f"  SAP ET_FIELDS returned {len(sap_field_names)} fields")
+                cursor = self.sql.execute(
+                    f"SELECT TOP 0 * FROM dbo.[{safe_table}]")
                 col_names = [desc[0] for desc in cursor.description]
+
+                # Use SAP field count for parsing (authoritative from Z_READ_TABLE)
+                if sap_field_names:
+                    if len(sap_field_names) != len(col_names):
+                        log.warning(
+                            f"  {table}: SAP ET_FIELDS has {len(sap_field_names)} fields "
+                            f"but MSSQL table has {len(col_names)} columns -- "
+                            f"using SAP field count for ROWDATA parsing")
+                    expected_cols = len(sap_field_names)
+                else:
+                    expected_cols = len(col_names)
 
             placeholders = ','.join(['?'] * len(col_names))
             col_list = ','.join(f"[{c}]" for c in col_names)
@@ -913,7 +1013,8 @@ class FullLoadReplicator:
 
             batch = []
             for row in data_rows:
-                values = row['ROWDATA'].split('|')
+                values = _parse_rowdata(row['ROWDATA'], expected_cols, table)
+                # Map SAP field count to MSSQL column count
                 if len(values) >= len(col_names):
                     vals = values[:len(col_names)]
                 else:
@@ -932,7 +1033,7 @@ class FullLoadReplicator:
             if result.get('EV_HAS_MORE') != 'X':
                 break
 
-        log.info(f"FULL LOAD complete: {table} — {total_rows} rows")
+        log.info(f"FULL LOAD complete: {table} -- {total_rows} rows")
         return True
 
 
@@ -1208,6 +1309,9 @@ class FlatfileReplicator:
             log.info(f"FLATFILE sync: {table} → dbo.{target}")
 
         # Step 1: Call Z_EXPORT_TABLE on SAP
+        # Normalize field list: remove spaces after commas (prevents ABAP
+        # dynamic SELECT from misinterpreting field names)
+        fields = _normalize_field_list(fields)
         params = {
             'IV_TABLE': table,
             'IV_FIELDS': fields,

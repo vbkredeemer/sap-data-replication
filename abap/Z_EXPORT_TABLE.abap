@@ -61,7 +61,8 @@ FUNCTION Z_EXPORT_TABLE.
         lv_count        TYPE i,
         lv_size         TYPE i,
         lv_check_table  TYPE string,
-        lv_check_field  TYPE string.
+        lv_check_field  TYPE string,
+        lv_tabname      TYPE ddobjname.
 
   CLEAR: ev_error, ev_file_name, ev_row_count, ev_file_size.
 
@@ -80,6 +81,11 @@ FUNCTION Z_EXPORT_TABLE.
     ev_error = |Invalid table name (only A-Z, 0-9, _, / allowed): { lv_check_table }|.
     RETURN.
   ENDIF.
+
+  " PITFALL O48: DDIF_NAMETAB_GET expects TYPE DDOBJNAME, not string.
+  " Passing lv_check_table (string) causes "Typkonflikt bei Aufruf eines
+  " Funktionsbausteins" at runtime. Use lv_tabname (ddobjname) instead.
+  lv_tabname = lv_check_table.
 
   "---------------------------------------------------------------------
   " Build field list
@@ -152,9 +158,10 @@ FUNCTION Z_EXPORT_TABLE.
               INTO lv_filename.
   CONCATENATE lv_file lv_filename INTO ev_file_name.
 
-  "---------------------------------------------------------------------
-  " Get table metadata via RTTS
-  "---------------------------------------------------------------------
+  "---------------------------------------------------------------------*
+  " Get table metadata via RTTS for dynamic structure creation
+  " AND use DDIF_NAMETAB_GET for flat field list (handles .INCLUDE)
+  "---------------------------------------------------------------------*
   DATA: lo_struct_descr TYPE REF TO cl_abap_structdescr,
         lt_components   TYPE cl_abap_structdescr=>component_table,
         ls_component    TYPE abap_componentdescr.
@@ -168,12 +175,33 @@ FUNCTION Z_EXPORT_TABLE.
   ENDIF.
 
   TRY.
-      lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_check_table ).
+      lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_tabname ).
     CATCH cx_root.
       ev_error = 'Cannot describe table ' && lv_check_table.
       RETURN.
   ENDTRY.
 
+  " Use DDIF_NAMETAB_GET for flat field list (correctly expands .INCLUDE)
+  DATA: lt_nametab TYPE TABLE OF dfies,
+        ls_nametab TYPE dfies.
+
+  CALL FUNCTION 'DDIF_NAMETAB_GET'
+    EXPORTING
+      tabname   = lv_tabname
+    TABLES
+      dfies_tab = lt_nametab
+    EXCEPTIONS
+      OTHERS    = 1.
+
+  IF sy-subrc <> 0.
+    ev_error = |Cannot get nametab for { lv_check_table }|.
+    RETURN.
+  ENDIF.
+
+  " Filter out .INCLUDE entries (fieldname starts with '.')
+  DELETE lt_nametab WHERE fieldname(1) = '.'.
+
+  " Build component table from nametab for RTTS (needed for dynamic structure)
   lt_components = lo_struct_descr->get_components( ).
 
   "---------------------------------------------------------------------
@@ -276,12 +304,14 @@ FUNCTION Z_EXPORT_TABLE.
 
   CALL FUNCTION 'DDIF_NAMETAB_GET'
     EXPORTING
-      tabname   = lv_check_table
+      tabname   = lv_tabname
     TABLES
       dfies_tab = lt_pk_fields
     EXCEPTIONS
       OTHERS    = 1.
 
+  " Filter out .INCLUDE entries before key extraction
+  DELETE lt_pk_fields WHERE fieldname(1) = '.'.
   DELETE lt_pk_fields WHERE keyflag <> 'X'.
 
   " Determine the first non-MANDT PK field for keyset paging
@@ -355,18 +385,52 @@ FUNCTION Z_EXPORT_TABLE.
   ENDIF.
 
   " Build field type map for conversion (before WHILE loop — static, no need to rebuild)
+  " Use nametab (flat field list) instead of components to handle .INCLUDE structures
   DATA: lt_type_map TYPE TABLE OF abap_typekind,
         lv_type_kind   TYPE abap_typekind,
         lv_type_idx TYPE i.
 
   LOOP AT lt_export_fields INTO lv_fieldname.
     CONDENSE lv_fieldname.
-    READ TABLE lt_components INTO ls_component
-      WITH KEY name = lv_fieldname.
+    " Look up type from nametab (flat list, includes .INCLUDE fields)
+    READ TABLE lt_nametab INTO ls_nametab
+      WITH KEY fieldname = lv_fieldname.
     IF sy-subrc = 0.
-      APPEND ls_component-type_kind TO lt_type_map.
+      " Map DDIC INTTYPE to ABAP typekind
+      CASE ls_nametab-inttype.
+        WHEN 'C' OR 'g'.
+          lv_type_kind = cl_abap_structdescr=>typekind_char.
+        WHEN 'N'.
+          lv_type_kind = cl_abap_structdescr=>typekind_num.
+        WHEN 'D'.
+          lv_type_kind = cl_abap_structdescr=>typekind_date.
+        WHEN 'T'.
+          lv_type_kind = cl_abap_structdescr=>typekind_time.
+        WHEN 'P'.
+          lv_type_kind = cl_abap_structdescr=>typekind_packed.
+        WHEN 'F'.
+          lv_type_kind = cl_abap_structdescr=>typekind_float.
+        WHEN 'I'.
+          lv_type_kind = cl_abap_structdescr=>typekind_int.
+        WHEN 's'.
+          lv_type_kind = cl_abap_structdescr=>typekind_int2.
+        WHEN 'b'.
+          lv_type_kind = cl_abap_structdescr=>typekind_int1.
+        WHEN 'X' OR 'y'.
+          lv_type_kind = cl_abap_structdescr=>typekind_hex.
+        WHEN OTHERS.
+          lv_type_kind = cl_abap_structdescr=>typekind_char.
+      ENDCASE.
+      APPEND lv_type_kind TO lt_type_map.
     ELSE.
-      APPEND cl_abap_structdescr=>typekind_char TO lt_type_map.
+      " Fallback: try components (for non-DDIC structures)
+      READ TABLE lt_components INTO ls_component
+        WITH KEY name = lv_fieldname.
+      IF sy-subrc = 0 AND ls_component-type IS BOUND.
+        APPEND ls_component-type->type_kind TO lt_type_map.
+      ELSE.
+        APPEND cl_abap_structdescr=>typekind_char TO lt_type_map.
+      ENDIF.
     ENDIF.
   ENDLOOP.
 
@@ -406,12 +470,12 @@ FUNCTION Z_EXPORT_TABLE.
 
             SELECT (lv_select_fields) FROM (lv_check_table)
               WHERE (lv_pk_where)
-              INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS
+              INTO CORRESPONDING FIELDS OF TABLE <ft_dynamic> UP TO lv_max_fetch ROWS
               ORDER BY (lv_orderby).
           ELSE.
             SELECT (lv_select_fields) FROM (lv_check_table)
               WHERE (lv_pk_where)
-              INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS
+              INTO CORRESPONDING FIELDS OF TABLE <ft_dynamic> UP TO lv_block_size ROWS
               ORDER BY (lv_orderby).
           ENDIF.
         ELSE.
@@ -426,11 +490,11 @@ FUNCTION Z_EXPORT_TABLE.
             ENDIF.
 
             SELECT (lv_select_fields) FROM (lv_check_table)
-              INTO TABLE <ft_dynamic> UP TO lv_max_fetch ROWS
+              INTO CORRESPONDING FIELDS OF TABLE <ft_dynamic> UP TO lv_max_fetch ROWS
               ORDER BY (lv_orderby).
           ELSE.
             SELECT (lv_select_fields) FROM (lv_check_table)
-              INTO TABLE <ft_dynamic> UP TO lv_block_size ROWS
+              INTO CORRESPONDING FIELDS OF TABLE <ft_dynamic> UP TO lv_block_size ROWS
               ORDER BY (lv_orderby).
           ENDIF.
         ENDIF.
@@ -461,6 +525,10 @@ FUNCTION Z_EXPORT_TABLE.
       LOOP AT lt_export_fields INTO lv_fieldname.
         CONDENSE lv_fieldname.
         lv_type_idx = lv_type_idx + 1.
+        " PITFALL O45/O47: Use fieldname-based ASSIGN (not position/colpos).
+        " The dynamic structure was created via describe_by_name, which gives
+        " the full DDIC layout. ASSIGN COMPONENT <fieldname> works correctly
+        " for all fields including those originally inside .INCLUDE structures.
         ASSIGN COMPONENT lv_fieldname OF STRUCTURE <fs_dynamic> TO <ff_field>.
         IF sy-subrc = 0.
           " Get type kind for this field

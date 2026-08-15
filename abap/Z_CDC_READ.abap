@@ -46,7 +46,8 @@ FUNCTION Z_CDC_READ.
         ls_data TYPE ZSQL_ROW,
         lv_rowdata TYPE string,
         lv_field_value TYPE string,
-        lv_check_table TYPE string.
+        lv_check_table TYPE string,
+        lv_tabname    TYPE ddobjname.
 
   CLEAR: ev_error, ev_row_count, ev_next_seq, ev_has_more.
   CLEAR: et_fields[], et_data[].
@@ -102,44 +103,23 @@ FUNCTION Z_CDC_READ.
   ENDIF.
 
   "---------------------------------------------------------------------
-  " Get table metadata via RTTS
+  " Get table metadata via DDIF_NAMETAB_GET (flat list, includes .INCLUDE fields)
   "---------------------------------------------------------------------
-  DATA: lo_struct_descr TYPE REF TO cl_abap_structdescr,
-        lt_components   TYPE cl_abap_structdescr=>component_table,
-        ls_component    TYPE abap_componentdescr.
+  DATA: lt_nametab TYPE TABLE OF dfies,
+        ls_nametab TYPE dfies,
+        lt_ddic_keyfields TYPE TABLE OF dfies,
+        ls_ddic_key  TYPE dfies.
 
-  SELECT SINGLE tabname FROM dd02l INTO @DATA(lv_exists)
-    WHERE tabname = @lv_check_table
-      AND as4local = 'A'.
-  IF sy-subrc <> 0.
-    ev_error = |Table { lv_check_table } does not exist in DDIC|.
-    RETURN.
-  ENDIF.
-
-  TRY.
-      lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_check_table ).
-    CATCH cx_root.
-      ev_error = 'Cannot describe table ' && lv_check_table.
-      RETURN.
-  ENDTRY.
-
-  lt_components = lo_struct_descr->get_components( ).
-
-  "---------------------------------------------------------------------*
-  " Build ET_FIELDS metadata + get key field names ONCE (not in loop)
-  "---------------------------------------------------------------------*
-  DATA: lv_colpos TYPE i.
-  lv_colpos = 1.
-
-  " Get DDIC key fields ONCE before the loop
-  DATA: lt_ddic_keyfields TYPE TABLE OF dfies,
-        ls_ddic_key       TYPE dfies.
+  " PITFALL O48: DDIF_NAMETAB_GET expects TYPE DDOBJNAME, not string.
+  " Passing lv_check_table (string) causes "Typkonflikt bei Aufruf eines
+  " Funktionsbausteins" at runtime. Use lv_tabname (ddobjname) instead.
+  lv_tabname = lv_check_table.
 
   CALL FUNCTION 'DDIF_NAMETAB_GET'
     EXPORTING
-      tabname   = lv_check_table
+      tabname   = lv_tabname
     TABLES
-      dfies_tab = lt_ddic_keyfields
+      dfies_tab = lt_nametab
     EXCEPTIONS
       OTHERS    = 1.
 
@@ -148,44 +128,52 @@ FUNCTION Z_CDC_READ.
     RETURN.
   ENDIF.
 
-  " Filter to key fields only
+  " Filter out .INCLUDE entries (fieldname starts with '.')
+  DELETE lt_nametab WHERE fieldname(1) = '.'.
+
+  " Key fields for WHERE clause building
+  lt_ddic_keyfields = lt_nametab.
   DELETE lt_ddic_keyfields WHERE keyflag <> 'X'.
 
-  LOOP AT lt_components INTO ls_component.
+  " Build ET_FIELDS from nametab (flat list, no .INCLUDE nesting issues)
+  DATA: lv_colpos TYPE i.
+  lv_colpos = 1.
+  LOOP AT lt_nametab INTO ls_nametab.
     CLEAR ls_field_cat.
-    ls_field_cat-fieldname = ls_component-name.
+    ls_field_cat-fieldname = ls_nametab-fieldname.
+    ls_field_cat-colpos = lv_colpos.
+    lv_colpos = lv_colpos + 1.
 
-    CASE ls_component-type_kind.
-      WHEN cl_abap_structdescr=>typekind_char
-        OR cl_abap_structdescr=>typekind_string.
+    " Map ABAP type to DATATYPE using INTTYPE
+    CASE ls_nametab-inttype.
+      WHEN 'C' OR 'g'.
         ls_field_cat-datatype = 'C'.
-      WHEN cl_abap_structdescr=>typekind_int.
-        ls_field_cat-datatype = 'I'.
-      WHEN cl_abap_structdescr=>typekind_int2.
-        ls_field_cat-datatype = 'INT2'.
-      WHEN cl_abap_structdescr=>typekind_int1.
-        ls_field_cat-datatype = 'INT1'.
-      WHEN cl_abap_structdescr=>typekind_packed.
-        ls_field_cat-datatype = 'P'.
-      WHEN cl_abap_structdescr=>typekind_float.
-        ls_field_cat-datatype = 'F'.
-      WHEN cl_abap_structdescr=>typekind_date.
+      WHEN 'D'.
         ls_field_cat-datatype = 'D'.
-      WHEN cl_abap_structdescr=>typekind_time.
+      WHEN 'T'.
         ls_field_cat-datatype = 'T'.
-      WHEN cl_abap_structdescr=>typekind_hex.
+      WHEN 'X'.
         ls_field_cat-datatype = 'X'.
+      WHEN 'P'.
+        ls_field_cat-datatype = 'P'.
+      WHEN 'F'.
+        ls_field_cat-datatype = 'F'.
+      WHEN 'I'.
+        ls_field_cat-datatype = 'I'.
+      WHEN 's'.
+        ls_field_cat-datatype = 'INT2'.
+      WHEN 'b'.
+        ls_field_cat-datatype = 'INT1'.
+      WHEN 'N'.
+        ls_field_cat-datatype = 'N'.
       WHEN OTHERS.
         ls_field_cat-datatype = 'C'.
     ENDCASE.
 
-    ls_field_cat-length = ls_component-length.
-    ls_field_cat-decimals = ls_component-decimals.
-    ls_field_cat-colpos = lv_colpos.
-    lv_colpos = lv_colpos + 1.
+    ls_field_cat-length = ls_nametab-leng.
+    ls_field_cat-decimals = ls_nametab-decimals.
     APPEND ls_field_cat TO et_fields.
   ENDLOOP.
-
   "---------------------------------------------------------------------
   " Read log table entries via ADBC
   " Then for each log entry, read the original row
@@ -239,8 +227,19 @@ FUNCTION Z_CDC_READ.
   FIELD-SYMBOLS: <fs_dynamic> TYPE ANY,
                  <fs_field>   TYPE ANY.
 
-  " Create dynamic structure for original table
-  DATA: ls_dynamic     TYPE REF TO data.
+  " Create dynamic structure for original table via RTTS
+  " describe_by_name gives us a structure handle that matches the DDIC table
+  " layout, so ASSIGN COMPONENT <fieldname> works correctly for all fields
+  " including those that were originally inside .INCLUDE structures.
+  DATA: lo_struct_descr TYPE REF TO cl_abap_structdescr,
+        ls_dynamic      TYPE REF TO data.
+
+  TRY.
+      lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_tabname ).
+    CATCH cx_root INTO DATA(lo_cx_desc).
+      ev_error = 'Cannot describe table ' && lv_check_table && ': ' && lo_cx_desc->get_text( ).
+      RETURN.
+  ENDTRY.
 
   CREATE DATA ls_dynamic TYPE HANDLE lo_struct_descr.
   ASSIGN ls_dynamic->* TO <fs_dynamic>.
