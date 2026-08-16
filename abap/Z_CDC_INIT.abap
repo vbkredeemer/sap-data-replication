@@ -197,8 +197,11 @@ FUNCTION Z_CDC_INIT.
       DATA(lo_result) = lo_sql2->execute_query(
         |SELECT COUNT(*) FROM SYS.TRIGGERS WHERE TRIGGER_NAME = '{ lv_trigger_full }'|
       ).
-      lo_result->next( ).
-      lv_trigger_count = lo_result->get_int( ).
+      IF lo_result->next( ) > 0.
+        lv_trigger_count = lo_result->get_int( ).
+      ELSE.
+        lv_trigger_count = 0.
+      ENDIF.
       lo_result->close( ).
     CATCH cx_root.
       " Cannot check — assume trigger doesn't exist

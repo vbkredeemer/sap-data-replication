@@ -180,7 +180,7 @@ FUNCTION Z_CDC_READ.
   "---------------------------------------------------------------------
   DATA: lo_sql_conn TYPE REF TO cl_sql_connection,
         lo_sql_stmt TYPE REF TO cl_sql_statement,
-        lo_result   TYPE REF TO cl_sql_result_cursor,
+        lo_result   TYPE REF TO cl_sql_result_set,
         lv_count    TYPE i.
 
   TRY.
@@ -430,9 +430,12 @@ FUNCTION Z_CDC_READ.
 
     TRY.
         lo_result = lo_sql_stmt->execute_query( lv_sql ).
-        lo_result->next( ).
-        DATA(lv_rem_str) = lo_result->get_char( ).
-        lv_remaining = lv_rem_str.
+        IF lo_result->next( ) > 0.
+          DATA(lv_rem_str) = lo_result->get_char( ).
+          lv_remaining = lv_rem_str.
+        ELSE.
+          lv_remaining = 0.
+        ENDIF.
         lo_result->close( ).
       CATCH cx_root.
         lv_remaining = 0.
