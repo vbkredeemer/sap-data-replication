@@ -25,20 +25,23 @@
       "name": "MARA",
       "mode": "cdc",
       "key_fields": "MATNR",
-      "chunk_size": 10000
+      "chunk_size": 10000,
+      "active": true
     },
     {
       "name": "KNA1",
       "mode": "cdc",
       "key_fields": "KUNNR",
-      "chunk_size": 10000
+      "chunk_size": 10000,
+      "active": true
     },
     {
       "name": "VBAK",
       "mode": "timeframe",
       "delta_field": "AEDAT",
       "window": "day",
-      "chunk_size": 10000
+      "chunk_size": 10000,
+      "active": true
     },
     {
       "name": "VBAP",
@@ -48,7 +51,8 @@
       "target_table": "VBAP",
       "replace_mode": "replace_window",
       "file_path": "/usr/sap/tmp/",
-      "fields": "*"
+      "fields": "*",
+      "active": true
     },
     {
       "name": "ACDOCA",
@@ -58,7 +62,8 @@
       "target_table": "ACDOCA",
       "replace_mode": "replace_window",
       "file_path": "/usr/sap/tmp/",
-      "fields": "*"
+      "fields": "*",
+      "active": true
     },
     {
       "name": "T001W",
@@ -66,7 +71,8 @@
       "target_table": "T001W",
       "replace_mode": "replace_all",
       "file_path": "/usr/sap/tmp/",
-      "fields": "*"
+      "fields": "*",
+      "active": true
     }
   ],
   "schedules": []

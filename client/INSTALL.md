@@ -143,19 +143,22 @@ python C:\sap-repl\sap_replicate.py --config C:\sap-repl\config.json
       "name": "MARA",
       "mode": "cdc",
       "key_fields": "MATNR",
-      "chunk_size": 10000
+      "chunk_size": 10000,
+      "active": true
     },
     {
       "name": "VBAK",
       "mode": "timeframe",
       "delta_field": "AEDAT",
       "window": "day",
-      "chunk_size": 10000
+      "chunk_size": 10000,
+      "active": true
     },
     {
       "name": "T001W",
       "mode": "full",
-      "chunk_size": 10000
+      "chunk_size": 10000,
+      "active": true
     }
   ]
 }
@@ -188,7 +191,36 @@ python sap_replicate.py --config config.json --table MARA --mode cdc # Mode übe
 python sap_replicate.py --config config.json --table VBAK --mode timeframe --window day
 python sap_replicate.py --config config.json --init-only              # Nur Trigger prüfen/anlegen
 python sap_replicate.py --config config.json --remove-cdc MARA        # CDC für MARA entfernen
+python sap_replicate.py --config config.json --import-tables C:\Scripts\SAP_ODBC\queried_tables.txt
 ```
+
+### Tabellen aus ODBC-Treiber-Log importieren
+
+Der SAP ODBC-Treiber protokolliert alle abgefragten Tabellen in einer Textdatei
+(`queried_tables.txt`, eine Tabelle pro Zeile). Mit `--import-tables` können diese
+Tabellen in die Konfiguration importiert werden:
+
+```cmd
+python sap_replicate.py --config config.json --import-tables C:\Scripts\SAP_ODBC\queried_tables.txt
+```
+
+**Verhalten:**
+- Neue Tabellen werden mit `mode=full`, `active=false`, `chunk_size=10000`, `fields=*` hinzugefügt
+- Bereits vorhandene Tabellen werden übersprungen (Deduplizierung, Case-insensitive)
+- Die Konfiguration wird direkt in der `config.json` aktualisiert
+- Importierte Tabellen sind **inaktiv** — sie werden beim Sync übersprungen
+- Aktivieren Sie Tabellen manuell in der GUI (Checkbox "Aktiv") oder durch Setzen von `"active": true` in der config.json
+
+**Log-Ausgabe:**
+```
+Imported 15 new tables from C:\Scripts\SAP_ODBC\queried_tables.txt, 3 already existed
+  New tables (inactive, review and activate):
+    EKKO
+    EKPO
+    ...
+```
+
+**Im GUI-Client:** Tab "Tabellen" → "Import" Button → Datei auswählen → Tabellen werden als inaktiv hinzugefügt → "Speichern"
 
 ## Monitoring
 

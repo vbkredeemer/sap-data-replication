@@ -517,10 +517,14 @@ class TablesTab(QWidget):
         self.btn_add.clicked.connect(self._add_table)
         self.btn_remove = QPushButton("- Entfernen")
         self.btn_remove.clicked.connect(self._remove_table)
+        self.btn_import = QPushButton("Import")
+        self.btn_import.setToolTip("Tabellen aus Datei importieren (eine pro Zeile, als inaktiv)")
+        self.btn_import.clicked.connect(self._import_tables)
         self.btn_save = QPushButton("Speichern")
         self.btn_save.clicked.connect(self._save)
         toolbar.addWidget(self.btn_add)
         toolbar.addWidget(self.btn_remove)
+        toolbar.addWidget(self.btn_import)
         toolbar.addStretch()
         toolbar.addWidget(self.btn_save)
         layout.addLayout(toolbar)
@@ -612,6 +616,87 @@ class TablesTab(QWidget):
         row = self.table.currentRow()
         if row >= 0:
             self.table.removeRow(row)
+
+    def _import_tables(self):
+        """Import table names from a file as inactive entries."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Tabellen-Datei importieren", "",
+            "Text Files (*.txt);;All Files (*.*)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as e:
+            QMessageBox.critical(self, "Fehler", f"Datei konnte nicht gelesen werden:\n{e}")
+            return
+
+        # Parse table names
+        import re
+        valid_re = re.compile(r'^[A-Za-z_][A-Za-z0-9_/]{0,30}$')
+        new_names = []
+        for line in lines:
+            name = line.strip()
+            if not name or name.startswith('#'):
+                continue
+            if not valid_re.match(name):
+                continue
+            new_names.append(name.upper())
+
+        # Deduplicate within file
+        seen = set()
+        unique_names = []
+        for n in new_names:
+            if n not in seen:
+                seen.add(n)
+                unique_names.append(n)
+
+        # Get existing table names (case-insensitive)
+        existing = {t.get('name', '').upper() for t in self.config.get('tables', [])}
+
+        # Also check what's currently in the table widget
+        for i in range(self.table.rowCount()):
+            item = self.table.item(i, 0)
+            if item:
+                existing.add(item.text().upper())
+
+        added = []
+        for name in unique_names:
+            if name not in existing:
+                added.append(name)
+
+        if not added:
+            QMessageBox.information(self, "Import",
+                f"Keine neuen Tabellen gefunden.\n"
+                f"{len(unique_names)} Tabellen in Datei, alle bereits vorhanden.")
+            return
+
+        # Add new rows to the table widget
+        for name in added:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self._set_row(row, {
+                'name': name,
+                'mode': 'full',
+                'key_fields': '',
+                'delta_field': '',
+                'window': '',
+                'target_table': '',
+                'replace_mode': 'append',
+                'chunk_size': 10000,
+                'fields': '*',
+                'active': False
+            })
+
+        already_existed = len(unique_names) - len(added)
+        QMessageBox.information(self, "Import erfolgreich",
+            f"{len(added)} neue Tabellen importiert (als inaktiv).\n"
+            f"{already_existed} bereits vorhanden.\n\n"
+            f"Neue Tabellen:\n" + "\n".join(f"  {n}" for n in added) +
+            f"\n\nSpeichern Sie die Konfiguration, um die Änderungen zu übernehmen.\n"
+            f"Aktivieren Sie die Tabellen im 'Aktiv' Checkbox, um sie zu syncen.")
 
     def _context_menu(self, pos):
         menu = QMenu(self)

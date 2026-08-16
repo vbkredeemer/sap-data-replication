@@ -1391,12 +1391,89 @@ def load_config(path: str) -> dict:
         return json.load(f)
 
 
+def import_tables(config_path: str, config: dict, file_path: str):
+    """Import table names from a file into config as inactive entries.
+
+    Reads a file with one table name per line. Deduplicates against
+    existing tables in config. New tables are added with mode='full',
+    active=false, chunk_size=10000, fields='*'.
+    """
+    if not os.path.exists(file_path):
+        log.error(f"File not found: {file_path}")
+        sys.exit(1)
+
+    # Read table names from file
+    with open(file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    # Parse and validate table names
+    new_names = []
+    for line in lines:
+        name = line.strip()
+        if not name or name.startswith('#'):
+            continue
+        try:
+            _validate_table_name(name)
+        except ValueError as e:
+            log.warning(f"  Skipping invalid table name: {name!r} ({e})")
+            continue
+        new_names.append(name.upper())
+
+    # Deduplicate within the file itself
+    seen = set()
+    unique_names = []
+    for n in new_names:
+        if n not in seen:
+            seen.add(n)
+            unique_names.append(n)
+
+    # Get existing table names (case-insensitive)
+    existing_names = {t.get('name', '').upper() for t in config.get('tables', [])}
+
+    # Find new tables
+    added = []
+    for name in unique_names:
+        if name not in existing_names:
+            added.append(name)
+
+    # Add new tables to config
+    for name in added:
+        config.setdefault('tables', []).append({
+            'name': name,
+            'mode': 'full',
+            'active': False,
+            'chunk_size': 10000,
+            'fields': '*'
+        })
+
+    # Write updated config back
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2)
+
+    already_existed = len(unique_names) - len(added)
+    log.info(f"Imported {len(added)} new tables from {file_path}, "
+             f"{already_existed} already existed")
+
+    if added:
+        log.info("  New tables (inactive, review and activate):")
+        for name in added:
+            log.info(f"    {name}")
+    else:
+        log.info("  No new tables to add")
+
+
 def run_table(table_cfg: dict, sap: SapConnection, sql: SqlServerConnection,
               state: StateManager, config: dict = None,
               mode_override: str = None, window_override: str = None):
     """Run sync for a single table based on its config."""
 
     table = table_cfg['name']
+
+    # Skip inactive tables
+    if not table_cfg.get('active', True):
+        log.info(f"  {table}: skipped (inactive)")
+        return True
+
     mode = mode_override or table_cfg.get('mode', 'timeframe')
     key_fields = table_cfg.get('key_fields', '')
     delta_field = table_cfg.get('delta_field', 'AEDAT')
@@ -1472,9 +1549,16 @@ def main():
                         help='Create table + indexes in MSSQL from SAP metadata')
     parser.add_argument('--sync-schema-all', action='store_true',
                         help='Create tables + indexes for all configured tables')
+    parser.add_argument('--import-tables', metavar='FILE',
+                        help='Import table names from a file (one per line) into config as inactive entries')
     args = parser.parse_args()
 
     config = load_config(args.config)
+
+    # --import-tables: read table names from file, add new ones as inactive
+    if args.import_tables:
+        import_tables(args.config, config, args.import_tables)
+        return
 
     # Connect
     sap = SapConnection(config['sap'])
@@ -1507,6 +1591,8 @@ def main():
             tables = config['tables']
             if args.table:
                 tables = [t for t in tables if t['name'] == args.table]
+            else:
+                tables = [t for t in tables if t.get('active', True)]
             cdc = CdcReplicator(sap, sql, state)
             for t in tables:
                 if t.get('mode') == 'cdc' and t.get('key_fields'):
@@ -1517,6 +1603,14 @@ def main():
         tables = config['tables']
         if args.table:
             tables = [t for t in tables if t['name'] == args.table]
+
+        # Filter out inactive tables (unless a specific table was requested)
+        if not args.table:
+            active_tables = [t for t in tables if t.get('active', True)]
+            skipped = len(tables) - len(active_tables)
+            if skipped > 0:
+                log.info(f"Skipping {skipped} inactive table(s)")
+            tables = active_tables
 
         success_count = 0
         fail_count = 0
