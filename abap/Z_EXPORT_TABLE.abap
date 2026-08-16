@@ -162,9 +162,7 @@ FUNCTION Z_EXPORT_TABLE.
   " Get table metadata via RTTS for dynamic structure creation
   " AND use DDIF_NAMETAB_GET for flat field list (handles .INCLUDE)
   "---------------------------------------------------------------------*
-  DATA: lo_struct_descr TYPE REF TO cl_abap_structdescr,
-        lt_components   TYPE cl_abap_structdescr=>component_table,
-        ls_component    TYPE abap_componentdescr.
+  DATA: lo_struct_descr TYPE REF TO cl_abap_structdescr.
 
   SELECT SINGLE tabname FROM dd02l INTO @DATA(lv_exists)
     WHERE tabname = @lv_check_table
@@ -201,8 +199,9 @@ FUNCTION Z_EXPORT_TABLE.
   " Filter out .INCLUDE entries (fieldname starts with '.')
   DELETE lt_nametab WHERE fieldname(1) = '.'.
 
-  " Build component table from nametab for RTTS (needed for dynamic structure)
-  lt_components = lo_struct_descr->get_components( ).
+  " Component table from get_components() removed — use DDIF_NAMETAB_GET
+  " flat field list (lt_nametab) for ALL field iteration. get_components()
+  " returns .INCLUDE entries as nested objects, missing flat field names.
 
   "---------------------------------------------------------------------
    " Determine which fields to export
@@ -213,8 +212,8 @@ FUNCTION Z_EXPORT_TABLE.
 
    IF lv_fields = '*'.
     lv_all_fields = abap_true.
-    LOOP AT lt_components INTO ls_component.
-      APPEND ls_component-name TO lt_export_fields.
+    LOOP AT lt_nametab INTO ls_nametab.
+      APPEND ls_nametab-fieldname TO lt_export_fields.
     ENDLOOP.
   ELSE.
     lv_all_fields = abap_false.
@@ -372,11 +371,11 @@ FUNCTION Z_EXPORT_TABLE.
     ENDLOOP.
   ENDIF.
 
-  " If no PK found (or only MANDT), use first field from components as fallback
+  " If no PK found (or only MANDT), use first field from nametab as fallback
   IF lv_orderby IS INITIAL.
-    READ TABLE lt_components INTO ls_component INDEX 1.
+    READ TABLE lt_nametab INTO ls_nametab INDEX 1.
     IF sy-subrc = 0.
-      lv_orderby = ls_component-name.
+      lv_orderby = ls_nametab-fieldname.
     ENDIF.
   ENDIF.
 
@@ -423,14 +422,8 @@ FUNCTION Z_EXPORT_TABLE.
       ENDCASE.
       APPEND lv_type_kind TO lt_type_map.
     ELSE.
-      " Fallback: try components (for non-DDIC structures)
-      READ TABLE lt_components INTO ls_component
-        WITH KEY name = lv_fieldname.
-      IF sy-subrc = 0 AND ls_component-type IS BOUND.
-        APPEND ls_component-type->type_kind TO lt_type_map.
-      ELSE.
-        APPEND cl_abap_structdescr=>typekind_char TO lt_type_map.
-      ENDIF.
+      " Field not found in nametab — default to CHAR type
+      APPEND cl_abap_structdescr=>typekind_char TO lt_type_map.
     ENDIF.
   ENDLOOP.
 
@@ -445,7 +438,7 @@ FUNCTION Z_EXPORT_TABLE.
           INTO lv_pk_where.
         IF lv_where IS NOT INITIAL.
           CONCATENATE lv_where ' AND ' lv_pk_where
-            INTO lv_pk_where SEPARATED BY space.
+            INTO lv_pk_where.
         ENDIF.
       ELSE.
         lv_pk_where = lv_where.
