@@ -33,7 +33,8 @@ from PySide6.QtWidgets import (
     QTabWidget, QLabel, QLineEdit, QComboBox, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QGroupBox, QFormLayout, QCheckBox,
     QSpinBox, QMessageBox, QFileDialog, QTextEdit, QProgressBar,
-    QStatusBar, QMenu, QAbstractItemView
+    QStatusBar, QMenu, QAbstractItemView, QDialog, QDialogButtonBox,
+    QGridLayout
 )
 from PySide6.QtGui import QFont, QColor, QAction
 
@@ -496,8 +497,158 @@ class SettingsTab(QWidget):
 # Tables Tab
 # ============================================================================
 
+class TableDetailDialog(QDialog):
+    """Detail dialog for editing ALL fields of a single table config.
+
+    Takes a table config dict as input, returns the modified dict via
+    get_config() or None if cancelled. Modal.
+    """
+
+    def __init__(self, table_config: dict, parent=None):
+        super().__init__(parent)
+        self._config = copy.deepcopy(table_config)
+        name = table_config.get('name', '')
+        self.setWindowTitle(f"Tabelle bearbeiten: {name}" if name else "Neue Tabelle")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self._build_ui()
+        self._load_values()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+
+        # name
+        self.name_edit = QLineEdit()
+        form.addRow("Tabelle:", self.name_edit)
+
+        # mode
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(TABLE_MODES)
+        form.addRow("Modus:", self.mode_combo)
+
+        # active
+        self.active_check = QCheckBox("aktiv")
+        form.addRow("Aktiv:", self.active_check)
+
+        # key_fields
+        self.key_fields_edit = QLineEdit()
+        self.key_fields_edit.setPlaceholderText("z.B. MANDT,MATNR")
+        form.addRow("Key Fields:", self.key_fields_edit)
+
+        # delta_field
+        self.delta_field_edit = QLineEdit()
+        self.delta_field_edit.setPlaceholderText("z.B. AEDAT, LAEDA")
+        form.addRow("Delta Field:", self.delta_field_edit)
+
+        # window
+        self.window_combo = QComboBox()
+        self.window_combo.addItems([''] + WINDOW_OPTIONS)
+        form.addRow("Window:", self.window_combo)
+
+        # target_table
+        self.target_table_edit = QLineEdit()
+        self.target_table_edit.setPlaceholderText("(leer = gleicher Name)")
+        form.addRow("Target Table:", self.target_table_edit)
+
+        # replace_mode
+        self.replace_combo = QComboBox()
+        self.replace_combo.addItems(REPLACE_MODES)
+        form.addRow("Replace Mode:", self.replace_combo)
+
+        # chunk_size
+        self.chunk_spin = QSpinBox()
+        self.chunk_spin.setRange(1, 1000000)
+        self.chunk_spin.setSingleStep(1000)
+        form.addRow("Chunk Size:", self.chunk_spin)
+
+        # fields
+        self.fields_edit = QLineEdit()
+        self.fields_edit.setPlaceholderText("* oder MATNR,ERNAM,...")
+        form.addRow("Fields:", self.fields_edit)
+
+        # file_path
+        self.file_path_edit = QLineEdit()
+        self.file_path_edit.setPlaceholderText("/usr/sap/tmp/")
+        form.addRow("File Path:", self.file_path_edit)
+
+        # date_field
+        self.date_field_edit = QLineEdit()
+        self.date_field_edit.setPlaceholderText("(optional)")
+        form.addRow("Date Field:", self.date_field_edit)
+
+        # max_rows
+        self.max_rows_spin = QSpinBox()
+        self.max_rows_spin.setRange(0, 10000000)
+        self.max_rows_spin.setSingleStep(1000)
+        self.max_rows_spin.setSpecialValueText("0 (unbegrenzt)")
+        form.addRow("Max Rows:", self.max_rows_spin)
+
+        layout.addLayout(form)
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _load_values(self):
+        t = self._config
+        self.name_edit.setText(t.get('name', ''))
+        self.mode_combo.setCurrentText(t.get('mode', 'timeframe'))
+        self.active_check.setChecked(t.get('active', True))
+        self.key_fields_edit.setText(t.get('key_fields', ''))
+        self.delta_field_edit.setText(t.get('delta_field', ''))
+        self.window_combo.setCurrentText(t.get('window', '') or '')
+        self.target_table_edit.setText(t.get('target_table', '') or '')
+        self.replace_combo.setCurrentText(t.get('replace_mode', 'append'))
+        self.chunk_spin.setValue(t.get('chunk_size', 10000))
+        self.fields_edit.setText(t.get('fields') or '*')
+        self.file_path_edit.setText(t.get('file_path', '') or '')
+        self.date_field_edit.setText(t.get('date_field', '') or '')
+        self.max_rows_spin.setValue(t.get('max_rows', 0))
+
+    def get_config(self) -> dict:
+        """Return the modified config dict. Call after exec() returns Accepted."""
+        cfg = copy.deepcopy(self._config)
+        cfg['name'] = self.name_edit.text().strip()
+        cfg['mode'] = self.mode_combo.currentText()
+        cfg['active'] = self.active_check.isChecked()
+        cfg['key_fields'] = self.key_fields_edit.text().strip()
+        cfg['delta_field'] = self.delta_field_edit.text().strip()
+        cfg['window'] = self.window_combo.currentText() or None
+        tt = self.target_table_edit.text().strip()
+        cfg['target_table'] = tt or None
+        cfg['replace_mode'] = self.replace_combo.currentText()
+        cfg['chunk_size'] = self.chunk_spin.value()
+        cfg['fields'] = self.fields_edit.text().strip() or '*'
+        fp = self.file_path_edit.text().strip()
+        cfg['file_path'] = fp or None
+        df = self.date_field_edit.text().strip()
+        cfg['date_field'] = df or None
+        cfg['max_rows'] = self.max_rows_spin.value()
+        return cfg
+
+
+# Column indices in the compact overview table
+COL_NAME = 0
+COL_MODE = 1
+COL_KEY = 2
+COL_WINDOW = 3
+COL_ACTIVE = 4
+
+# Qt.UserRole key for storing the full config dict on the name item
+CONFIG_ROLE = Qt.UserRole + 1
+
+
 class TablesTab(QWidget):
-    """Table configuration: list of tables with per-table mode settings."""
+    """Table configuration: compact 5-column overview with detail dialog.
+
+    Stores the full config dict per row in Qt.UserRole on the name item,
+    so the detail dialog can read/write the complete config without
+    losing fields that are not shown in the overview.
+    """
 
     config_changed = Signal()
 
@@ -520,86 +671,112 @@ class TablesTab(QWidget):
         self.btn_import = QPushButton("Import")
         self.btn_import.setToolTip("Tabellen aus Datei importieren (eine pro Zeile, als inaktiv)")
         self.btn_import.clicked.connect(self._import_tables)
+        self.btn_edit = QPushButton("Bearbeiten")
+        self.btn_edit.setToolTip("Detail-Dialog für ausgewählte Tabelle öffnen")
+        self.btn_edit.clicked.connect(self._edit_selected)
         self.btn_save = QPushButton("Speichern")
         self.btn_save.clicked.connect(self._save)
         toolbar.addWidget(self.btn_add)
         toolbar.addWidget(self.btn_remove)
         toolbar.addWidget(self.btn_import)
+        toolbar.addWidget(self.btn_edit)
         toolbar.addStretch()
         toolbar.addWidget(self.btn_save)
         layout.addLayout(toolbar)
 
-        # --- Table List ---
+        # --- Compact overview table (5 columns) ---
         self.table = QTableWidget()
-        self.table.setColumnCount(10)
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels([
-            "Tabelle", "Modus", "Key Fields", "Delta Field",
-            "Window", "Target Table", "Replace Mode",
-            "Chunk Size", "Fields", "Aktiv"
+            "Tabelle", "Modus", "Key Fields", "Window", "Aktiv"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
+        self.table.doubleClicked.connect(self._on_double_click)
+        # Column widths
+        self.table.setColumnWidth(COL_NAME, 180)
+        self.table.setColumnWidth(COL_MODE, 90)
+        self.table.setColumnWidth(COL_KEY, 200)
+        self.table.setColumnWidth(COL_WINDOW, 90)
+        self.table.setColumnWidth(COL_ACTIVE, 60)
         layout.addWidget(self.table)
 
-    def _load_tables(self):
-        tables = self.config.get('tables', [])
-        self.table.setRowCount(len(tables))
-        for i, t in enumerate(tables):
-            self._set_row(i, t)
+    def _on_double_click(self, index):
+        """Open detail dialog on double-click (same as Bearbeiten button)."""
+        self._edit_row(index.row())
+
+    def _edit_selected(self):
+        """Open detail dialog for the currently selected row."""
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Bearbeiten",
+                "Bitte zuerst eine Tabelle auswählen.")
+            return
+        self._edit_row(row)
+
+    def _edit_row(self, row: int):
+        """Open the detail dialog for a row and apply the result."""
+        cfg = self._get_row_config(row)
+        dialog = TableDetailDialog(cfg, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            new_cfg = dialog.get_config()
+            self._set_row(row, new_cfg)
+
+    # ------------------------------------------------------------------
+    # Row data helpers
+    # ------------------------------------------------------------------
 
     def _set_row(self, row: int, t: dict):
-        # Table name
-        self.table.setItem(row, 0, QTableWidgetItem(t.get('name', '')))
+        """Set the 5 visible columns and store full config in Qt.UserRole."""
+        # Name
+        name_item = QTableWidgetItem(t.get('name', ''))
+        name_item.setData(CONFIG_ROLE, copy.deepcopy(t))
+        self.table.setItem(row, COL_NAME, name_item)
 
-        # Mode combo
-        mode_combo = QComboBox()
-        mode_combo.addItems(TABLE_MODES)
-        mode_combo.setCurrentText(t.get('mode', 'timeframe'))
-        self.table.setCellWidget(row, 1, mode_combo)
+        # Mode (read-only text in overview)
+        self.table.setItem(row, COL_MODE, QTableWidgetItem(t.get('mode', 'timeframe')))
 
-        # Key fields
-        self.table.setItem(row, 2, QTableWidgetItem(t.get('key_fields', '')))
+        # Key Fields
+        self.table.setItem(row, COL_KEY, QTableWidgetItem(t.get('key_fields', '')))
 
-        # Delta field
-        self.table.setItem(row, 3, QTableWidgetItem(t.get('delta_field', '')))
-
-        # Window combo
-        window_combo = QComboBox()
-        window_combo.addItems([''] + WINDOW_OPTIONS)
-        window_combo.setCurrentText(t.get('window', ''))
-        self.table.setCellWidget(row, 4, window_combo)
-
-        # Target table
-        self.table.setItem(row, 5, QTableWidgetItem(t.get('target_table', '')))
-
-        # Replace mode combo
-        replace_combo = QComboBox()
-        replace_combo.addItems(REPLACE_MODES)
-        replace_combo.setCurrentText(t.get('replace_mode', 'append'))
-        self.table.setCellWidget(row, 6, replace_combo)
-
-        # Chunk size
-        chunk_spin = QSpinBox()
-        chunk_spin.setRange(1, 1000000)
-        chunk_spin.setValue(t.get('chunk_size', 10000))
-        chunk_spin.setSingleStep(1000)
-        self.table.setCellWidget(row, 7, chunk_spin)
-
-        # Fields
-        self.table.setItem(row, 8, QTableWidgetItem(t.get('fields') or '*'))
+        # Window
+        self.table.setItem(row, COL_WINDOW, QTableWidgetItem(t.get('window', '') or ''))
 
         # Active checkbox
         active_check = QCheckBox()
         active_check.setChecked(t.get('active', True))
-        self.table.setCellWidget(row, 9, active_check)
+        self.table.setCellWidget(row, COL_ACTIVE, active_check)
+
+    def _get_row_config(self, row: int) -> dict:
+        """Read the full config dict stored on the name item (UserRole)."""
+        item = self.table.item(row, COL_NAME)
+        if item is not None:
+            cfg = item.data(CONFIG_ROLE)
+            if cfg is not None:
+                # Sync the active checkbox state (user can toggle inline)
+                cfg = copy.deepcopy(cfg)
+                widget = self.table.cellWidget(row, COL_ACTIVE)
+                if isinstance(widget, QCheckBox):
+                    cfg['active'] = widget.isChecked()
+                return cfg
+        # Fallback: build from visible cells
+        return {
+            'name': self.table.item(row, COL_NAME).text() if self.table.item(row, COL_NAME) else '',
+            'mode': self.table.item(row, COL_MODE).text() if self.table.item(row, COL_MODE) else 'timeframe',
+            'key_fields': self.table.item(row, COL_KEY).text() if self.table.item(row, COL_KEY) else '',
+            'window': self.table.item(row, COL_WINDOW).text() if self.table.item(row, COL_WINDOW) else '',
+            'active': True,
+        }
 
     def _add_table(self):
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self._set_row(row, {
+        defaults = {
             'name': 'NEW_TABLE',
             'mode': 'timeframe',
             'key_fields': '',
@@ -609,8 +786,15 @@ class TablesTab(QWidget):
             'replace_mode': 'append',
             'chunk_size': 10000,
             'fields': '*',
+            'file_path': '',
+            'date_field': '',
+            'max_rows': 0,
             'active': True
-        })
+        }
+        self._set_row(row, defaults)
+        # Open the detail dialog immediately for editing
+        self.table.selectRow(row)
+        self._edit_row(row)
 
     def _remove_table(self):
         row = self.table.currentRow()
@@ -653,12 +837,10 @@ class TablesTab(QWidget):
                 seen.add(n)
                 unique_names.append(n)
 
-        # Get existing table names (case-insensitive)
-        existing = {t.get('name', '').upper() for t in self.config.get('tables', [])}
-
-        # Also check what's currently in the table widget
+        # Get existing table names (from the overview rows)
+        existing = set()
         for i in range(self.table.rowCount()):
-            item = self.table.item(i, 0)
+            item = self.table.item(i, COL_NAME)
             if item:
                 existing.add(item.text().upper())
 
@@ -687,6 +869,9 @@ class TablesTab(QWidget):
                 'replace_mode': 'append',
                 'chunk_size': 10000,
                 'fields': '*',
+                'file_path': '',
+                'date_field': '',
+                'max_rows': 0,
                 'active': False
             })
 
@@ -700,57 +885,37 @@ class TablesTab(QWidget):
 
     def _context_menu(self, pos):
         menu = QMenu(self)
+        action_edit = menu.addAction("Bearbeiten")
         action_add = menu.addAction("Duplizieren")
         action_del = menu.addAction("Entfernen")
         action = menu.exec_(self.table.mapToGlobal(pos))
         row = self.table.rowAt(pos.y())
-        if action == action_add and row >= 0:
+        if action == action_edit and row >= 0:
+            self._edit_row(row)
+        elif action == action_add and row >= 0:
             self._duplicate_row(row)
         elif action == action_del and row >= 0:
             self.table.removeRow(row)
 
     def _duplicate_row(self, row: int):
-        t = self._read_row(row)
-        t['name'] = t['name'] + '_COPY'
+        t = self._get_row_config(row)
+        t['name'] = (t.get('name', '') or '') + '_COPY'
         new_row = self.table.rowCount()
         self.table.insertRow(new_row)
         self._set_row(new_row, t)
 
-    def _read_row(self, row: int) -> dict:
-        def get_text(col):
-            item = self.table.item(row, col)
-            return item.text() if item else ''
+    # ------------------------------------------------------------------
+    # Config collection / save
+    # ------------------------------------------------------------------
 
-        def get_combo(col):
-            widget = self.table.cellWidget(row, col)
-            if isinstance(widget, QComboBox):
-                return widget.currentText()
-            return ''
-
-        def get_spin(col):
-            widget = self.table.cellWidget(row, col)
-            if isinstance(widget, QSpinBox):
-                return widget.value()
-            return 0
-
-        def get_check(col):
-            widget = self.table.cellWidget(row, col)
-            if isinstance(widget, QCheckBox):
-                return widget.isChecked()
-            return True
-
-        return {
-            'name': get_text(0),
-            'mode': get_combo(1),
-            'key_fields': get_text(2),
-            'delta_field': get_text(3),
-            'window': get_combo(4),
-            'target_table': get_text(5) or None,
-            'replace_mode': get_combo(6),
-            'chunk_size': get_spin(7),
-            'fields': get_text(8) or '*',
-            'active': get_check(9)
-        }
+    def _collect_tables(self) -> list:
+        """Collect all table configs from the overview rows."""
+        tables = []
+        for i in range(self.table.rowCount()):
+            t = self._get_row_config(i)
+            if t.get('name') and t['name'] != 'NEW_TABLE':
+                tables.append(t)
+        return tables
 
     def _save(self):
         ok, msg = self._save_silent()
@@ -762,13 +927,9 @@ class TablesTab(QWidget):
 
     def _save_silent(self):
         """Save tables without showing a dialog. Returns (success, message)."""
-        tables = []
-        for i in range(self.table.rowCount()):
-            t = self._read_row(i)
-            if t['name'] and t['name'] != 'NEW_TABLE':
-                tables.append(t)
+        tables = self._collect_tables()
 
-        # Preserve unknown fields (e.g. file_path) from existing config
+        # Preserve unknown fields from existing config
         old_by_name = {t.get('name'): t for t in self.config.get('tables', [])}
         for t in tables:
             old = old_by_name.get(t['name'], {})
@@ -784,17 +945,13 @@ class TablesTab(QWidget):
             return False, f"Speichern fehlgeschlagen: {e}"
 
     def get_active_tables(self) -> list:
-        tables = []
-        for i in range(self.table.rowCount()):
-            t = self._read_row(i)
-            if t.get('active', True) and t['name'] and t['name'] != 'NEW_TABLE':
-                tables.append(t)
-        return tables
+        return [t for t in self._collect_tables()
+                if t.get('active', True) and t.get('name') and t['name'] != 'NEW_TABLE']
 
     def get_selected_table(self) -> Optional[dict]:
         row = self.table.currentRow()
         if row >= 0:
-            return self._read_row(row)
+            return self._get_row_config(row)
         return None
 
 
