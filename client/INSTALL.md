@@ -14,7 +14,7 @@
 
 ### Client-Seite (Windows / MSSQL Server)
 1. **Python 3.10+** — https://python.org
-2. **pyrfc** — `pip install pyrfc`
+2. **sap_rfc.py** — im Projektverzeichnis enthalten (pure-Python ctypes, kein pip install nötig)
 3. **pyodbc** — `pip install pyodbc`
 4. **SAP NWRFC SDK** — `sapnwrfc.dll` in `C:\Windows\System32` oder im PATH
 5. **ODBC Driver for SQL Server** — Microsoft SQL Server ODBC Driver 17 oder 18
@@ -24,13 +24,13 @@
 
 ### Variante A: Standalone .exe (empfohlen — kein Python nötig)
 
-Die .exe bündelt Python, PySide6, pyrfc, pyodbc und paramiko. Der einzige
+Die .exe bündelt Python, PySide6, sap_rfc, pyodbc und paramiko. Der einzige
 manuelle Schritt: Die 4 SAP NWRFC DLLs neben die .exe legen.
 
 **Schritt 1: .exe bauen** (auf einem Windows-Rechner mit Python)
 
 ```cmd
-pip install pyinstaller PySide6 pyrfc pyodbc paramiko
+pip install pyinstaller PySide6 pyodbc paramiko
 pyinstaller sap_replication_client.spec
 :: → dist\SAPDataReplication.exe
 ```
@@ -59,7 +59,7 @@ DLLs sind bereits im System.
 
 Falls die UAC-Abfrage abgelehnt wird: Die DLLs bleiben im Programmordner und
 werden über den DLL-Suchpfad geladen. Das funktioniert, ist aber weniger
-robust (z.B. bei anderen Tools die ebenfalls pyrfc nutzen).
+robust (z.B. bei anderen Tools die ebenfalls sap_rfc nutzen).
 
 **Fehlen DLLs**, erscheint eine Fehlermeldung mit einer Liste der benötigten
 Dateien und Download-Anleitung.
@@ -89,7 +89,7 @@ Der GUI-Client hat vier Tabs:
 
 ```cmd
 :: Abhängigkeiten installieren
-pip install pyrfc pyodbc
+pip install pyodbc
 
 :: Konfiguration kopieren und anpassen
 copy config.example.json config.json
@@ -112,7 +112,7 @@ Für jeden Baustein in SE37:
 
 ```cmd
 :: Abhängigkeiten installieren
-pip install pyrfc pyodbc
+pip install pyodbc
 
 :: Konfiguration kopieren und anpassen
 copy config.example.json config.json
@@ -297,4 +297,4 @@ WHERE TRIGGER_NAME LIKE 'Z_%_CDC_TRG_%';
 | `GAP DETECTED` | Trigger war weg — Full-Load ausführen: `--table X --mode full` |
 | `Z_READ_TABLE error` | Tabelle existiert nicht oder keine Berechtigung |
 | `INSERT failed` | Zieltabelle hat nicht die richtigen Spalten |
-| `pyrfc not found` | `pip install pyrfc` + NWRFC SDK installieren |
+| `sap_rfc not found` | sap_rfc.py fehlt im Projektverzeichnis, NWRFC SDK installieren |

@@ -4,7 +4,7 @@ PyInstaller spec for SAP Data Replication GUI Client
 Builds a standalone Windows .exe with all dependencies bundled.
 
 Usage:
-  pip install pyinstaller PySide6 pyrfc pyodbc
+  pip install pyinstaller PySide6 pyodbc
   pyinstaller sap_replication_client.spec
 """
 
@@ -17,9 +17,10 @@ a = Analysis(
     datas=[
         ('config.example.json', '.'),
         ('sap_replicate.py', '.'),
+        ('sap_rfc.py', '.'),
     ],
     hiddenimports=[
-        'pyrfc',
+        'sap_rfc',
         'pyodbc',
         'sap_replicate',
         'paramiko',

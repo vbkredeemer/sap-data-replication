@@ -11,7 +11,7 @@ Vier Modi:
   4. Flatfile-Modus: Z_EXPORT_TABLE → SCP/SMB → BULK INSERT
 
 Voraussetzungen:
-  - pyrfc (pip install pyrfc) + SAP NWRFC SDK (sapnwrfc.dll/.so)
+  - sap_rfc.py (included, pure-Python ctypes wrapper) + SAP NWRFC SDK (sapnwrfc.dll/.so)
   - pyodbc (pip install pyodbc) + ODBC Driver for SQL Server
   - SAP-Funktionsbausteine: Z_CDC_INIT, Z_CDC_READ, Z_CDC_CLEANUP, Z_READ_TABLE
   - DDIC-Typen: ZSQL_FIELD, ZSQL_ROW (aus dem ODBC-Projekt)
@@ -32,7 +32,7 @@ import sys
 from datetime import datetime, date, timedelta
 from typing import List, Tuple
 
-# NWRFC DLL bootstrap — must run before pyrfc is imported
+# NWRFC DLL bootstrap — must run before sap_rfc is imported
 from nwrfc_bootstrap import bootstrap as _nwrfc_bootstrap
 _nwrfc_status, _nwrfc_msg = _nwrfc_bootstrap()
 if _nwrfc_status == "missing":
@@ -42,9 +42,9 @@ if _nwrfc_status == "elevated":
     sys.exit(0)
 
 try:
-    from pyrfc import Connection
+    from sap_rfc import Connection
 except ImportError:
-    print("ERROR: pyrfc not installed. Install with: pip install pyrfc")
+    print("ERROR: sap_rfc module not found. It should be in the same directory.")
     print("       Also requires SAP NWRFC SDK (sapnwrfc.dll/.so)")
     sys.exit(1)
 
@@ -196,7 +196,7 @@ def _calculate_window_range(window: str) -> Tuple[str, str]:
 # ============================================================================
 
 class SapConnection:
-    """Wraps pyrfc Connection with error handling."""
+    """Wraps sap_rfc Connection with error handling."""
 
     def __init__(self, config: dict):
         self.config = config

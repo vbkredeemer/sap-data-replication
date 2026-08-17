@@ -1,7 +1,7 @@
 """
 NWRFC DLL Bootstrap
 ====================
-Ensures the 4 SAP NWRFC SDK DLLs are available before pyrfc is imported.
+Ensures the 4 SAP NWRFC SDK DLLs are available before sap_rfc is imported.
 
 The 4 required DLLs (from SAP NWRFC SDK 7.50, Windows x64):
   - sapnwrfc.dll    — SAP RFC runtime
@@ -16,11 +16,11 @@ Strategy:
      a. Try to copy them to System32 (needs admin rights).
      b. If not admin, trigger a UAC elevation prompt to copy them.
      c. If user declines, add the local directory to the DLL search path
-        as a fallback (works for pyrfc, but less robust than System32).
+        as a fallback (works for sap_rfc, but less robust than System32).
   4. If DLLs are nowhere to be found, show a clear error message with
      download instructions.
 
-This module must be imported BEFORE any pyrfc import.
+This module must be imported BEFORE any sap_rfc import.
 """
 
 import ctypes
@@ -102,7 +102,7 @@ def _elevate_and_copy(src_dir: Path, dlls_to_copy: list) -> bool:
 def _add_to_dll_path(directory: Path):
     """Add a directory to the DLL search path for the current process."""
     try:
-        # Use SetDllDirectoryW — pyrfc/libsapnwrfc will find DLLs there
+        # Use SetDllDirectoryW — sap_rfc/libsapnwrfc will find DLLs there
         ctypes.windll.kernel32.SetDllDirectoryW(str(directory))
     except Exception:
         # Fallback: add to PATH
@@ -192,7 +192,7 @@ def ensure_nwrfc_dlls() -> tuple:
 def bootstrap():
     """
     Main entry point. Call this at the very start of the application,
-    before any pyrfc import.
+    before any sap_rfc import.
 
     On Windows: shows a message box if there are issues (when frozen).
     Returns (status, message).

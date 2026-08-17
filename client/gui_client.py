@@ -27,7 +27,7 @@ import subprocess
 from datetime import datetime
 from typing import Optional
 
-# NWRFC DLL bootstrap — must run before pyrfc is imported anywhere
+# NWRFC DLL bootstrap — must run before sap_rfc is imported anywhere
 from nwrfc_bootstrap import bootstrap as _nwrfc_bootstrap
 _nwrfc_status, _nwrfc_msg = _nwrfc_bootstrap()
 if _nwrfc_status == "missing":
@@ -477,7 +477,7 @@ class SettingsTab(QWidget):
         try:
             p = os.path.dirname(os.path.abspath(__file__))
             if p not in sys.path: sys.path.insert(0, p)
-            from pyrfc import Connection
+            from sap_rfc import Connection
             conn = Connection(
                 ashost=self.sap_host.text(),
                 sysnr=self.sap_sysnr.text(),

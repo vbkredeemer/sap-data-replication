@@ -1,5 +1,6 @@
 # Core dependencies
-pyrfc>=2.0
+# Note: pyrfc is no longer used — sap_rfc.py (included in this directory)
+#       is a pure-Python ctypes wrapper for sapnwrfc.dll/.so. No pip install needed.
 pyodbc>=5.0
 paramiko>=3.0
 
