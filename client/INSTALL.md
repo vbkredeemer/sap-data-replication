@@ -22,7 +22,49 @@
 
 ## Installation
 
-### Variante A: GUI-Client (empfohlen)
+### Variante A: Standalone .exe (empfohlen — kein Python nötig)
+
+Die .exe bündelt Python, PySide6, pyrfc, pyodbc und paramiko. Der einzige
+manuelle Schritt: Die 4 SAP NWRFC DLLs neben die .exe legen.
+
+**Schritt 1: .exe bauen** (auf einem Windows-Rechner mit Python)
+
+```cmd
+pip install pyinstaller PySide6 pyrfc pyodbc paramiko
+pyinstaller sap_replication_client.spec
+:: → dist\SAPDataReplication.exe
+```
+
+**Schritt 2: NWRFC DLLs bereitstellen**
+
+Kopiere diese 4 DLLs aus dem SAP NWRFC SDK 7.50 (`nwrfcsdk\bin\`) **neben** die
+`SAPDataReplication.exe` (gleicher Ordner):
+
+| DLL | Quelle |
+|-----|--------|
+| `libsapnwrfc.dll` | SAP NWRFC SDK 7.50 |
+| `icudt57.dll` | SAP NWRFC SDK 7.50 |
+| `icuin57.dll` | SAP NWRFC SDK 7.50 |
+| `icuuc57.dll` | SAP NWRFC SDK 7.50 |
+
+> **Wichtig:** Diese DLLs sind SAP-lizenziert und dürfen **nicht** mitgeliefert
+> werden. Jeder Anwender muss sie aus seinem eigenen NWRFC SDK kopieren.
+
+**Schritt 3: .exe starten**
+
+Beim ersten Start erkennt die .exe die 4 DLLs im Programmordner und kopiert
+sie automatisch nach `C:\Windows\System32` (mit UAC-Abfrage). Danach startet
+die App automatisch neu. Bei nachfolgenden Starts passiert nichts mehr — die
+DLLs sind bereits im System.
+
+Falls die UAC-Abfrage abgelehnt wird: Die DLLs bleiben im Programmordner und
+werden über den DLL-Suchpfad geladen. Das funktioniert, ist aber weniger
+robust (z.B. bei anderen Tools die ebenfalls pyrfc nutzen).
+
+**Fehlen DLLs**, erscheint eine Fehlermeldung mit einer Liste der benötigten
+Dateien und Download-Anleitung.
+
+### Variante B: GUI-Client mit Python (Entwickler)
 
 ```cmd
 :: Abhängigkeiten installieren
@@ -43,7 +85,7 @@ Der GUI-Client hat vier Tabs:
 3. **Ausführen** — Sync starten, CDC initialisieren, Schema erstellen, Log-Ausgabe
 4. **Zeitplan** — Eingebauter Scheduler + Windows-Aufgabe erstellen
 
-### Variante B: Kommandozeile
+### Variante C: Kommandozeile
 
 ```cmd
 :: Abhängigkeiten installieren

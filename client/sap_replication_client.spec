@@ -23,6 +23,7 @@ a = Analysis(
         'pyodbc',
         'sap_replicate',
         'paramiko',
+        'nwrfc_bootstrap',
     ],
     hookspath=[],
     hooksconfig={},

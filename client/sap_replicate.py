@@ -32,6 +32,15 @@ import sys
 from datetime import datetime, date, timedelta
 from typing import List, Tuple
 
+# NWRFC DLL bootstrap — must run before pyrfc is imported
+from nwrfc_bootstrap import bootstrap as _nwrfc_bootstrap
+_nwrfc_status, _nwrfc_msg = _nwrfc_bootstrap()
+if _nwrfc_status == "missing":
+    print(f"ERROR: {_nwrfc_msg}", file=sys.stderr)
+    sys.exit(1)
+if _nwrfc_status == "elevated":
+    sys.exit(0)
+
 try:
     from pyrfc import Connection
 except ImportError:

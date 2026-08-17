@@ -27,6 +27,14 @@ import subprocess
 from datetime import datetime
 from typing import Optional
 
+# NWRFC DLL bootstrap — must run before pyrfc is imported anywhere
+from nwrfc_bootstrap import bootstrap as _nwrfc_bootstrap
+_nwrfc_status, _nwrfc_msg = _nwrfc_bootstrap()
+if _nwrfc_status == "missing":
+    sys.exit(1)
+if _nwrfc_status == "elevated":
+    sys.exit(0)
+
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
