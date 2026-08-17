@@ -16,7 +16,7 @@
 1. **Python 3.10+** — https://python.org
 2. **pyrfc** — `pip install pyrfc`
 3. **pyodbc** — `pip install pyodbc`
-4. **SAP NWRFC SDK** — `libsapnwrfc.dll` in `C:\Windows\System32` oder im PATH
+4. **SAP NWRFC SDK** — `sapnwrfc.dll` in `C:\Windows\System32` oder im PATH
 5. **ODBC Driver for SQL Server** — Microsoft SQL Server ODBC Driver 17 oder 18
 6. **Zieldatenbank** — SQL Server Datenbank mit Tabellen die den SAP-Tabellen entsprechen
 
@@ -42,7 +42,7 @@ Kopiere diese 4 DLLs aus dem SAP NWRFC SDK 7.50 (`nwrfcsdk\bin\`) **neben** die
 
 | DLL | Quelle |
 |-----|--------|
-| `libsapnwrfc.dll` | SAP NWRFC SDK 7.50 |
+| `sapnwrfc.dll` | SAP NWRFC SDK 7.50 |
 | `icudt57.dll` | SAP NWRFC SDK 7.50 |
 | `icuin57.dll` | SAP NWRFC SDK 7.50 |
 | `icuuc57.dll` | SAP NWRFC SDK 7.50 |

@@ -11,7 +11,7 @@ Vier Modi:
   4. Flatfile-Modus: Z_EXPORT_TABLE → SCP/SMB → BULK INSERT
 
 Voraussetzungen:
-  - pyrfc (pip install pyrfc) + SAP NWRFC SDK (libsapnwrfc.dll/.so)
+  - pyrfc (pip install pyrfc) + SAP NWRFC SDK (sapnwrfc.dll/.so)
   - pyodbc (pip install pyodbc) + ODBC Driver for SQL Server
   - SAP-Funktionsbausteine: Z_CDC_INIT, Z_CDC_READ, Z_CDC_CLEANUP, Z_READ_TABLE
   - DDIC-Typen: ZSQL_FIELD, ZSQL_ROW (aus dem ODBC-Projekt)
@@ -45,7 +45,7 @@ try:
     from pyrfc import Connection
 except ImportError:
     print("ERROR: pyrfc not installed. Install with: pip install pyrfc")
-    print("       Also requires SAP NWRFC SDK (libsapnwrfc.dll/.so)")
+    print("       Also requires SAP NWRFC SDK (sapnwrfc.dll/.so)")
     sys.exit(1)
 
 try:

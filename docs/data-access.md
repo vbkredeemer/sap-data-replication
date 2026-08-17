@@ -22,7 +22,7 @@ HANA
 - **Batch-Operationen** — MSSQL Bulk Insert für schnelles Schreiben
 
 ### Nachteile
-- **NWRFC SDK muss installiert sein** — `libsapnwrfc.dll` auf dem Client-Rechner
+- **NWRFC SDK muss installiert sein** — `sapnwrfc.dll` auf dem Client-Rechner
 - **Python: pyrfc** — braucht kompilierte Extension, nicht immer trivial zu installieren
 - **C#:** Entweder ERPConnect (kommerziell) oder direkte P/Invoke der NWRFC DLL (aufwendig)
 - **Kein Standard-Interface** — jedes Tool muss das Protokoll selbst implementieren

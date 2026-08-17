@@ -4,7 +4,7 @@ NWRFC DLL Bootstrap
 Ensures the 4 SAP NWRFC SDK DLLs are available before pyrfc is imported.
 
 The 4 required DLLs (from SAP NWRFC SDK 7.50, Windows x64):
-  - libsapnwrfc.dll   — SAP RFC runtime
+  - sapnwrfc.dll    — SAP RFC runtime
   - icudt57.dll       — ICU Data (Unicode)
   - icuin57.dll       — ICU Internationalization
   - icuuc57.dll       — ICU Common Utilities
@@ -32,7 +32,7 @@ from pathlib import Path
 
 # The 4 NWRFC DLLs that cannot be redistributed
 NWRFC_DLLS = [
-    "libsapnwrfc.dll",
+    "sapnwrfc.dll",
     "icudt57.dll",
     "icuin57.dll",
     "icuuc57.dll",
