@@ -739,6 +739,14 @@ class TablesTab(QWidget):
     # Row data helpers
     # ------------------------------------------------------------------
 
+    def _load_tables(self):
+        """Load tables from config into the overview widget."""
+        self.table.setRowCount(0)
+        for t in self.config.get('tables', []):
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self._set_row(row, t)
+
     def _set_row(self, row: int, t: dict):
         """Set the 5 visible columns and store full config in Qt.UserRole."""
         # Name
