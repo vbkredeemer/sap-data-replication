@@ -904,7 +904,7 @@ class TablesTab(QWidget):
         action_edit = menu.addAction("Bearbeiten")
         action_add = menu.addAction("Duplizieren")
         action_del = menu.addAction("Entfernen")
-        action = menu.exec_(self.table.mapToGlobal(pos))
+        action = menu.exec(self.table.mapToGlobal(pos))
         row = self.table.rowAt(pos.y())
         if action == action_edit and row >= 0:
             self._edit_row(row)
@@ -984,6 +984,7 @@ class RunTab(QWidget):
         self.tables_tab = tables_tab
         self.worker = None
         self._scheduler_triggered = False
+        self.status_bar = None  # set by MainWindow after _build_ui
         self._build_ui()
 
     def _build_ui(self):
