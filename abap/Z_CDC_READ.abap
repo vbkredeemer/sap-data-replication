@@ -152,7 +152,7 @@ FUNCTION Z_CDC_READ.
         ls_field_cat-datatype = 'D'.
       WHEN 'T'.
         ls_field_cat-datatype = 'T'.
-      WHEN 'X'.
+      WHEN 'X' OR 'y'.
         ls_field_cat-datatype = 'X'.
       WHEN 'P'.
         ls_field_cat-datatype = 'P'.
@@ -194,11 +194,8 @@ FUNCTION Z_CDC_READ.
   "---------------------------------------------------------------------*
   " Query log table: get SEQ, OPERATION, KEYVALUES
   "---------------------------------------------------------------------*
-  CONCATENATE 'SELECT SEQ, OPERATION, KEYVALUES, TIMESTMP FROM '
-              lv_log_table
-              ' WHERE SEQ > ' iv_from_seq
-              ' ORDER BY SEQ ASC'
-              INTO lv_sql.
+  lv_sql = |SELECT SEQ, OPERATION, KEYVALUES, TIMESTMP FROM { lv_log_table }| &&
+           | WHERE SEQ > { iv_from_seq } ORDER BY SEQ ASC|.
 
   " Set max rows instead of LIMIT (ADBC doesn't support LIMIT)
   TRY.
@@ -424,9 +421,7 @@ FUNCTION Z_CDC_READ.
     " Check if there are more entries — query with iv_from_seq, not lv_max_seq
     " to avoid counting already-processed entries
     DATA: lv_remaining TYPE i.
-    CONCATENATE 'SELECT COUNT(*) FROM ' lv_log_table
-                ' WHERE SEQ > ' lv_max_seq
-                INTO lv_sql.
+    lv_sql = |SELECT COUNT(*) FROM { lv_log_table } WHERE SEQ > { lv_max_seq }|.
 
     TRY.
         lo_result = lo_sql_stmt->execute_query( lv_sql ).

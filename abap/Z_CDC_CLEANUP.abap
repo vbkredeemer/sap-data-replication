@@ -101,9 +101,7 @@ FUNCTION Z_CDC_CLEANUP.
   " Mode 1: Cleanup log entries up to IV_UP_TO_SEQ
   "---------------------------------------------------------------------
   IF iv_remove_all = ' ' AND iv_up_to_seq > 0.
-    CONCATENATE 'DELETE FROM ' lv_log_table
-                ' WHERE SEQ <= ' iv_up_to_seq
-                INTO lv_sql.
+    lv_sql = |DELETE FROM { lv_log_table } WHERE SEQ <= { iv_up_to_seq }|.
 
     TRY.
         DATA(lo_result) = lo_sql_stmt->execute_update( lv_sql ).

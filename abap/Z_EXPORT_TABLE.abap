@@ -221,11 +221,11 @@ FUNCTION Z_EXPORT_TABLE.
   "---------------------------------------------------------------------*
   " Validate field names — only alphanumeric and underscore allowed
   "---------------------------------------------------------------------*
-  LOOP AT lt_export_fields INTO lv_fieldname.
-    CONDENSE lv_fieldname NO-GAPS.
-    TRANSLATE lv_fieldname TO UPPER CASE.
-    IF NOT lv_fieldname CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
-      ev_error = |Invalid field name (only A-Z, 0-9, _, / allowed): { lv_fieldname }|.
+  LOOP AT lt_export_fields ASSIGNING FIELD-SYMBOL(<fs_export_field>).
+    CONDENSE <fs_export_field> NO-GAPS.
+    TRANSLATE <fs_export_field> TO UPPER CASE.
+    IF NOT <fs_export_field> CO 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/'.
+      ev_error = |Invalid field name (only A-Z, 0-9, _, / allowed): { <fs_export_field> }|.
       RETURN.
     ENDIF.
   ENDLOOP.
@@ -290,11 +290,13 @@ FUNCTION Z_EXPORT_TABLE.
         lv_total       TYPE i VALUE 0,
         lv_done        TYPE abap_bool VALUE abap_false.
 
-  DATA: lt_pk_fields   TYPE TABLE OF dfies,
-        ls_pk_field    TYPE dfies,
-        lv_pk_where    TYPE string,
-        lv_last_key    TYPE string,
-        lv_first_block TYPE abap_bool VALUE abap_true.
+  " Get primary key fields for keyset paging
+  DATA: lt_pk_fields TYPE TABLE OF dfies,
+        ls_pk_field  TYPE dfies,
+        lv_pk_where  TYPE string,
+        lv_last_key  TYPE string,
+        lv_first_block TYPE abap_bool VALUE abap_true,
+        lv_single_pass TYPE abap_bool VALUE abap_false.
 
   CALL FUNCTION 'DDIF_NAMETAB_GET'
     EXPORTING
@@ -365,9 +367,19 @@ FUNCTION Z_EXPORT_TABLE.
     lv_orderby = 'PRIMARY KEY'.
   ENDIF.
 
-  DATA: lt_type_map  TYPE TABLE OF abap_typekind,
-        lv_type_kind TYPE abap_typekind,
-        lv_type_idx  TYPE i.
+  " M2 safeguard: If no non-MANDT PK field was found for keyset paging,
+  " the WHERE clause cannot advance between iterations, causing an infinite
+  " loop (same block fetched forever). Tables with only MANDT as PK are
+  " not supported for keyset paging — fall back to single-pass mode.
+  IF lv_keyset_field-fieldname IS INITIAL.
+    lv_single_pass = abap_true.
+  ENDIF.
+
+  " Build field type map for conversion (before WHILE loop — static, no need to rebuild)
+  " Use nametab (flat field list) instead of components to handle .INCLUDE structures
+  DATA: lt_type_map TYPE TABLE OF abap_typekind,
+        lv_type_kind   TYPE abap_typekind,
+        lv_type_idx TYPE i.
 
   LOOP AT lt_export_fields INTO lv_fieldname.
     CONDENSE lv_fieldname.
@@ -562,8 +574,10 @@ FUNCTION Z_EXPORT_TABLE.
 
             WHEN cl_abap_structdescr=>typekind_char
               OR cl_abap_structdescr=>typekind_string.
-              lv_char_val = <ff_field>.
-              SHIFT lv_char_val LEFT DELETING LEADING space.
+              " CHAR/STRING — as-is, but remove trailing spaces
+              lv_char_val = |{ <ff_field> }|.
+              " Don't CONDENSE — preserves internal spaces, only removes trailing
+              SHIFT lv_char_val RIGHT DELETING TRAILING space.
 
             WHEN OTHERS.
               lv_char_val = |{ <ff_field> }|.
@@ -599,6 +613,14 @@ FUNCTION Z_EXPORT_TABLE.
       lv_done = abap_true.
     ENDIF.
 
+    " M2 safeguard: single-pass mode for tables with no keyset field
+    " (only MANDT PK) — can't do keyset paging, so stop after first block
+    IF lv_done = abap_false AND lv_single_pass = abap_true.
+      lv_done = abap_true.
+    ENDIF.
+
+    " Remember last key for keyset paging (first non-MANDT PK field)
+    " lv_keyset_field was determined before the loop; reuse it here
     IF lv_done = abap_false AND lv_keyset_field-fieldname IS NOT INITIAL.
       DESCRIBE TABLE <ft_dynamic> LINES DATA(lv_line_count).
       READ TABLE <ft_dynamic> ASSIGNING <fs_dynamic> INDEX lv_line_count.
