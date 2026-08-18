@@ -198,8 +198,10 @@ FUNCTION Z_CDC_INIT.
       DATA(lo_result) = lo_sql2->execute_query(
         |SELECT COUNT(*) FROM SYS.TRIGGERS WHERE TRIGGER_NAME = '{ lv_trigger_full }'|
       ).
+      GET REFERENCE OF lv_trigger_count INTO DATA(lr_count).
+      lo_result->set_param( lr_count ).
       IF lo_result->next( ) > 0.
-        lv_trigger_count = lo_result->get_int( ).
+        " lv_trigger_count is populated directly by set_param
       ELSE.
         lv_trigger_count = 0.
       ENDIF.
