@@ -36,8 +36,8 @@ FUNCTION Z_CDC_READ.
 *"     VALUE(EV_HAS_MORE) TYPE  CHAR1
 *"     VALUE(EV_ERROR) TYPE  STRING
 *"  TABLES
-*"      ET_FIELDS STRUCTURE  ZSQL_FIELD
-*"      ET_DATA STRUCTURE  ZSQL_ROW
+*"*"      ET_FIELDS LIKE  ZSQL_FIELD
+*"*"      ET_DATA LIKE  ZSQL_ROW
 *"----------------------------------------------------------------------
 
   DATA: lv_log_table     TYPE tabname,
@@ -367,9 +367,9 @@ FUNCTION Z_CDC_READ.
                     CONCATENATE '0x' lv_x INTO lv_field_value.
 
                   WHEN OTHERS.
-                    " CHAR/STRING — remove leading spaces
+                    " CHAR/STRING — remove trailing spaces only (preserve leading)
                     lv_field_value = <fs_field>.
-                    SHIFT lv_field_value LEFT DELETING LEADING space.
+                    SHIFT lv_field_value RIGHT DELETING TRAILING space.
                 ENDCASE.
 
                 CONCATENATE lv_rowdata lv_field_value INTO lv_rowdata SEPARATED BY '|'.
