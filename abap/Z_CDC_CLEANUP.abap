@@ -59,7 +59,9 @@ FUNCTION Z_CDC_CLEANUP.
   "---------------------------------------------------------------------*
   " Build names (must match Z_CDC_INIT logic)
   "---------------------------------------------------------------------*
-  DATA: lv_tab_len TYPE i.
+  DATA: lv_tab_len TYPE i,
+        lv_hash_str TYPE string,
+        lv_short TYPE string.
   lv_tab_len = strlen( lv_check_table ).
 
   IF lv_tab_len > 18.
@@ -67,11 +69,11 @@ FUNCTION Z_CDC_CLEANUP.
       EXPORTING
         data = lv_check_table
       IMPORTING
-        hashstring = DATA(lv_hash_str)
+        hashstring = lv_hash_str
       EXCEPTIONS
         OTHERS = 1.
     IF sy-subrc = 0 AND strlen( lv_hash_str ) >= 6.
-      DATA(lv_short) = lv_hash_str(6).
+      lv_short = lv_hash_str(6).
     ELSE.
       lv_short = lv_check_table(6).
     ENDIF.

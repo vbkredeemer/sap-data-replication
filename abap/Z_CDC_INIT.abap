@@ -167,7 +167,7 @@ FUNCTION Z_CDC_INIT.
         DATA: lv_now_tstmp TYPE timestampl.
         GET TIME STAMP FIELD lv_now_tstmp.
         TRY.
-            DATA(lv_diff_secs) = cl_abap_tstmp=>subtractsecs(
+            DATA(lv_diff_secs) = cl_abap_tstmp=>subtract(
               tstmp1 = lv_now_tstmp
               tstmp2 = lv_last_time ).
             lv_age_hours = lv_diff_secs / 3600.
