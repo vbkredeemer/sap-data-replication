@@ -287,6 +287,624 @@ class SyncWorker(QThread):
 
 
 # ============================================================================
+# Diagnose Worker Thread — runs sap_diagnose.py tests in background
+# ============================================================================
+
+class DiagnoseWorker(QThread):
+    """Runs SAP diagnostic tests in a background thread.
+
+    Reimplements the safe tests from sap_diagnose.py inline (avoids import
+    complexity). Emits HTML-formatted lines via output_signal so the dialog
+    can display colored ✓/✗/⚠/ℹ markers.
+
+    Phases (all read-only unless init_test=True):
+      1. Connection test
+      2. Function module existence (metadata lookup)
+      3. Safe read-only tests: Z_READ_TABLE, Z_EXPORT_TABLE+Z_DELETE_FILE,
+         Z_EXECUTE_SQL
+      4. CDC status check (read-only)
+      5. Init-Test (only if init_test=True): full CDC lifecycle on ZTLANGTXT
+      6. Summary table
+    """
+
+    output_signal = Signal(str)   # HTML line to append
+    finished_signal = Signal()    # emitted when done
+
+    # Function modules checked
+    _FM_LIST = [
+        "Z_CDC_INIT",
+        "Z_CDC_READ",
+        "Z_CDC_CLEANUP",
+        "Z_EXPORT_TABLE",
+        "Z_DELETE_FILE",
+        "Z_READ_TABLE",
+        "Z_EXECUTE_SQL",
+    ]
+
+    def __init__(self, sap_settings: dict, init_test: bool = False):
+        super().__init__()
+        self.sap_settings = sap_settings
+        self.init_test = init_test
+
+    # ---- output helpers (emit HTML-formatted lines) ----
+
+    def _emit(self, text: str):
+        """Emit a plain (black) line."""
+        self.output_signal.emit(
+            html_module.escape(text).replace('\n', '<br>')
+        )
+
+    def _emit_raw(self, html: str):
+        """Emit a pre-formatted HTML line."""
+        self.output_signal.emit(html)
+
+    def _emit_ok(self, text: str):
+        self.output_signal.emit(
+            f'<span style="color:#008800">✓ {html_module.escape(text)}</span>'
+        )
+
+    def _emit_fail(self, text: str):
+        self.output_signal.emit(
+            f'<span style="color:#CC0000">✗ {html_module.escape(text)}</span>'
+        )
+
+    def _emit_warn(self, text: str):
+        self.output_signal.emit(
+            f'<span style="color:#CC8800">⚠ {html_module.escape(text)}</span>'
+        )
+
+    def _emit_info(self, text: str):
+        self.output_signal.emit(
+            f'<span style="color:#0066CC">ℹ {html_module.escape(text)}</span>'
+        )
+
+    def _emit_header(self, text: str):
+        self.output_signal.emit(
+            f'<b>{html_module.escape(text)}</b>'
+        )
+
+    def _emit_separator(self):
+        self.output_signal.emit(
+            '<span style="color:#888">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>'
+        )
+
+    # ---- FM existence check (metadata-only, no side effects) ----
+
+    def _check_fm_exists(self, conn, func_name: str) -> tuple:
+        """Check if a function module exists via RfcGetFunctionDesc.
+
+        Returns (exists: bool, detail: str)
+        """
+        try:
+            func_name_bytes = (
+                func_name.encode('utf-16-le') + b'\x00\x00'
+            )
+            from ctypes import byref
+            from sap_rfc import RFC_ERROR_INFO, _uc_array_to_str
+            lib = conn._lib
+            if lib is None:
+                return False, "SAP NWRFC library not loaded"
+            error = RFC_ERROR_INFO()
+            func_desc = lib.RfcGetFunctionDesc(
+                conn._connection_handle, func_name_bytes, byref(error),
+            )
+            if func_desc:
+                return True, "metadata lookup succeeded"
+            else:
+                key = _uc_array_to_str(error.key)
+                msg = _uc_array_to_str(error.message)
+                return False, f"not found: {key} — {msg}"
+        except Exception as e:
+            return False, f"error checking: {e}"
+
+    # ---- main run method ----
+
+    def run(self):
+        # Track results for the summary table
+        # key -> (status, detail)  status: 'ok'|'fail'|'warn'|'info'|'skip'
+        summary = {}
+
+        try:
+            # Ensure local directory is on sys.path for sap_rfc import
+            p = os.path.dirname(os.path.abspath(__file__))
+            if p not in sys.path:
+                sys.path.insert(0, p)
+            from sap_rfc import Connection, SAPRFCError
+
+            host = self.sap_settings.get('ashost', '')
+            sysnr = self.sap_settings.get('sysnr', '00')
+            client = self.sap_settings.get('client', '100')
+            user = self.sap_settings.get('user', '')
+            passwd = self.sap_settings.get('password', '')
+            lang = self.sap_settings.get('lang', 'EN') or 'EN'
+
+            self._emit_separator()
+            self._emit_header("=== SAP Data Replication Diagnostics ===")
+            self._emit_separator()
+
+            # --- Phase 1: Connection test ---
+            self._emit_header("--- Phase 1: Verbindungstest ---")
+            self._emit(f"Host: {host}, SysNr: {sysnr}, Client: {client}, User: {user}, Lang: {lang}")
+
+            conn = None
+            try:
+                conn = Connection(
+                    ashost=host,
+                    sysnr=sysnr,
+                    client=client,
+                    user=user,
+                    passwd=passwd,
+                    lang=lang,
+                )
+                self._emit_ok(f"Verbindung OK (host: {host}, client: {client})")
+                summary['Verbindung'] = ('ok', 'OK')
+            except SAPRFCError as e:
+                self._emit_fail(f"Verbindung fehlgeschlagen: {e}")
+                summary['Verbindung'] = ('fail', str(e))
+                self._emit_summary(summary)
+                self._emit_fail("Diagnose abgebrochen — keine SAP-Verbindung.")
+                self.finished_signal.emit()
+                return
+            except Exception as e:
+                self._emit_fail(f"Verbindung fehlgeschlagen (unerwartet): {e}")
+                summary['Verbindung'] = ('fail', str(e))
+                self._emit_summary(summary)
+                self._emit_fail("Diagnose abgebrochen — keine SAP-Verbindung.")
+                self.finished_signal.emit()
+                return
+
+            # --- Phase 2: Function module existence ---
+            self._emit("")
+            self._emit_header("--- Phase 2: Funktionsbausteine prüfen ---")
+
+            fm_exists = {}
+            for fm in self._FM_LIST:
+                try:
+                    exists, detail = self._check_fm_exists(conn, fm)
+                except Exception as e:
+                    exists, detail = False, f"error: {e}"
+                fm_exists[fm] = exists
+                if exists:
+                    self._emit_ok(f"{fm}")
+                    summary[fm] = ('ok', 'Existiert')
+                else:
+                    self._emit_fail(f"{fm} (nicht gefunden)")
+                    summary[fm] = ('fail', 'Nicht gefunden')
+
+            # --- Phase 3: Read-only tests ---
+            self._emit("")
+            self._emit_header("--- Phase 3: Read-only Tests ---")
+
+            # Z_READ_TABLE: read 1 row from ZTLANGTXT
+            if fm_exists.get("Z_READ_TABLE"):
+                try:
+                    res = conn.call('Z_READ_TABLE',
+                                    IV_TABLE='ZTLANGTXT',
+                                    IV_WHERE='',
+                                    IV_FIELDS='*',
+                                    IV_ORDERBY='',
+                                    IV_ROWSKIPS=0,
+                                    IV_ROWCOUNT=1)
+                    err = res.get('EV_ERROR')
+                    if err:
+                        self._emit_fail(f"Z_READ_TABLE: EV_ERROR: {err}")
+                        summary['Z_READ_TABLE'] = ('fail', f'EV_ERROR: {err}')
+                    else:
+                        data_rows = res.get('ET_DATA', [])
+                        fields = res.get('ET_FIELDS', [])
+                        field_names = [f.get('FIELDNAME', '?') for f in fields][:3]
+                        self._emit_ok(
+                            f"Z_READ_TABLE: {len(data_rows)} Zeile aus ZTLANGTXT gelesen "
+                            f"({'|'.join(field_names) if field_names else 'keine Felder'})"
+                        )
+                        summary['Z_READ_TABLE'] = ('ok', f'Getestet (1 Zeile aus ZTLANGTXT)')
+                except SAPRFCError as e:
+                    self._emit_fail(f"Z_READ_TABLE: {e}")
+                    summary['Z_READ_TABLE'] = ('fail', str(e))
+                except Exception as e:
+                    self._emit_fail(f"Z_READ_TABLE (unerwartet): {e}")
+                    summary['Z_READ_TABLE'] = ('fail', str(e))
+            else:
+                self._emit_warn("Z_READ_TABLE übersprungen (FM nicht gefunden)")
+                summary['Z_READ_TABLE'] = ('warn', 'Nicht gefunden')
+
+            # Z_EXPORT_TABLE: export 1 row to /tmp/, then Z_DELETE_FILE cleanup
+            export_ok = False
+            remote_file = None
+            if fm_exists.get("Z_EXPORT_TABLE"):
+                try:
+                    res = conn.call('Z_EXPORT_TABLE',
+                                    IV_TABLE='ZTLANGTXT',
+                                    IV_FIELDS='*',
+                                    IV_MAX_ROWS=1,
+                                    IV_FILE_PATH='/tmp/')
+                    err = res.get('EV_ERROR')
+                    if err:
+                        self._emit_fail(f"Z_EXPORT_TABLE: EV_ERROR: {err}")
+                        summary['Z_EXPORT_TABLE'] = ('fail', f'EV_ERROR: {err}')
+                    else:
+                        remote_file = res.get('EV_FILE_NAME', '')
+                        row_count = res.get('EV_ROW_COUNT', 0)
+                        self._emit_ok(f"Z_EXPORT_TABLE: {row_count} Zeile exportiert → {remote_file}")
+                        export_ok = True
+                except SAPRFCError as e:
+                    self._emit_fail(f"Z_EXPORT_TABLE: {e}")
+                    summary['Z_EXPORT_TABLE'] = ('fail', str(e))
+                except Exception as e:
+                    self._emit_fail(f"Z_EXPORT_TABLE (unerwartet): {e}")
+                    summary['Z_EXPORT_TABLE'] = ('fail', str(e))
+            else:
+                self._emit_warn("Z_EXPORT_TABLE übersprungen (FM nicht gefunden)")
+                summary['Z_EXPORT_TABLE'] = ('warn', 'Nicht gefunden')
+
+            # Z_DELETE_FILE cleanup
+            if export_ok and remote_file and fm_exists.get("Z_DELETE_FILE"):
+                try:
+                    res = conn.call('Z_DELETE_FILE', IV_FILE_PATH=remote_file)
+                    err = res.get('EV_ERROR')
+                    if err:
+                        self._emit_warn(f"Z_EXPORT_TABLE: Export OK, aber Cleanup fehlgeschlagen: {err}")
+                        summary['Z_EXPORT_TABLE'] = ('warn', 'Export OK, Cleanup fehlgeschlagen')
+                        summary['Z_DELETE_FILE'] = ('fail', f'EV_ERROR: {err}')
+                    else:
+                        self._emit_ok(f"Z_DELETE_FILE: Datei bereinigt ({remote_file})")
+                        summary['Z_DELETE_FILE'] = ('ok', 'Getestet (Datei gelöscht)')
+                        # Update Z_EXPORT_TABLE summary to include cleanup
+                        summary['Z_EXPORT_TABLE'] = ('ok', 'Getestet (1 Zeile, Cleanup OK)')
+                except SAPRFCError as e:
+                    self._emit_warn(f"Z_EXPORT_TABLE: Export OK, aber Cleanup fehlgeschlagen: {e}")
+                    summary['Z_DELETE_FILE'] = ('fail', str(e))
+                    summary['Z_EXPORT_TABLE'] = ('warn', 'Export OK, Cleanup fehlgeschlagen')
+                except Exception as e:
+                    self._emit_warn(f"Z_EXPORT_TABLE: Export OK, aber Cleanup fehlgeschlagen: {e}")
+                    summary['Z_DELETE_FILE'] = ('fail', str(e))
+                    summary['Z_EXPORT_TABLE'] = ('warn', 'Export OK, Cleanup fehlgeschlagen')
+            elif fm_exists.get("Z_DELETE_FILE") and not export_ok:
+                if 'Z_DELETE_FILE' not in summary:
+                    summary['Z_DELETE_FILE'] = ('skip', 'Nicht getestet (kein Export)')
+            elif not fm_exists.get("Z_DELETE_FILE"):
+                summary['Z_DELETE_FILE'] = ('warn', 'Nicht gefunden')
+
+            # Z_EXECUTE_SQL: harmless SELECT
+            if fm_exists.get("Z_EXECUTE_SQL"):
+                try:
+                    res = conn.call('Z_EXECUTE_SQL',
+                                    IV_SQL='SELECT MANDT FROM ZTLANGTXT',
+                                    IV_MAX_ROWS=1)
+                    err = res.get('EV_ERROR')
+                    if err:
+                        self._emit_warn(f"Z_EXECUTE_SQL: exists but query failed: {err}")
+                        summary['Z_EXECUTE_SQL'] = ('warn', f'Query failed: {err}')
+                    else:
+                        data = res.get('ET_DATA', [])
+                        self._emit_ok(f"Z_EXECUTE_SQL: SELECT ausgeführt ({len(data)} Zeile)")
+                        summary['Z_EXECUTE_SQL'] = ('ok', 'Getestet (SELECT OK)')
+                except SAPRFCError as e:
+                    self._emit_fail(f"Z_EXECUTE_SQL: {e}")
+                    summary['Z_EXECUTE_SQL'] = ('fail', str(e))
+                except Exception as e:
+                    self._emit_fail(f"Z_EXECUTE_SQL (unerwartet): {e}")
+                    summary['Z_EXECUTE_SQL'] = ('fail', str(e))
+            else:
+                self._emit_warn("Z_EXECUTE_SQL übersprungen (FM nicht gefunden)")
+                summary['Z_EXECUTE_SQL'] = ('warn', 'Nicht gefunden')
+
+            # --- Phase 4: CDC status (read-only) ---
+            self._emit("")
+            self._emit_header("--- Phase 4: CDC Status ---")
+
+            cdc_table = 'ZTLANGTXT'
+            log_table = f"Z_{cdc_table}_CDC_LOG"
+            cdc_initialized = False
+
+            if fm_exists.get("Z_EXECUTE_SQL"):
+                try:
+                    res = conn.call('Z_EXECUTE_SQL',
+                                    IV_SQL=f'SELECT COUNT(*) FROM {log_table}',
+                                    IV_MAX_ROWS=1)
+                    err = res.get('EV_ERROR')
+                    if err:
+                        self._emit_info(f"CDC für {cdc_table}: nicht initialisiert")
+                        summary[f'CDC {cdc_table}'] = ('info', 'Nicht initialisiert')
+                    else:
+                        data = res.get('ET_DATA', [])
+                        count_str = ''
+                        if data:
+                            count_str = data[0].get('ROWDATA', '').strip()
+                        cdc_initialized = True
+                        self._emit_info(
+                            f"CDC für {cdc_table}: bereits initialisiert "
+                            f"(Einträge: {count_str or 'unbekannt'})"
+                        )
+                        summary[f'CDC {cdc_table}'] = ('info', f'Initialisiert ({count_str} Einträge)')
+                except SAPRFCError:
+                    self._emit_info(f"CDC für {cdc_table}: nicht initialisiert")
+                    summary[f'CDC {cdc_table}'] = ('info', 'Nicht initialisiert')
+                except Exception as e:
+                    self._emit_warn(f"CDC für {cdc_table}: konnte nicht geprüft werden: {e}")
+                    summary[f'CDC {cdc_table}'] = ('warn', f'Check failed: {e}')
+            else:
+                self._emit_warn("CDC Status kann nicht geprüft werden (Z_EXECUTE_SQL nicht verfügbar)")
+                summary[f'CDC {cdc_table}'] = ('warn', 'Z_EXECUTE_SQL nicht verfügbar')
+
+            # --- Phase 5: Init-Test (only if checkbox checked) ---
+            if self.init_test:
+                self._emit("")
+                self._emit_header("--- Phase 5: Init-Test (CDC Lifecycle auf ZTLANGTXT) ---")
+                self._emit_warn("Achtung: Erstellt Trigger auf ZTLANGTXT. Nach Test wird alles wieder entfernt.")
+
+                init_ok = False
+                # Z_CDC_INIT
+                if fm_exists.get("Z_CDC_INIT"):
+                    try:
+                        # ZTLANGTXT key fields: SPRSL, SPRSL_ISOLA
+                        res = conn.call('Z_CDC_INIT',
+                                        IV_TABLE='ZTLANGTXT',
+                                        IV_KEYFIELDS='SPRSL,SPRSL_ISOLA')
+                        err = res.get('EV_ERROR')
+                        if err:
+                            self._emit_fail(f"Z_CDC_INIT: EV_ERROR: {err}")
+                            summary['Z_CDC_INIT'] = ('fail', f'EV_ERROR: {err}')
+                        else:
+                            trigger_exists = res.get('EV_TRIGGER_EXISTS', '')
+                            if trigger_exists == 'X':
+                                self._emit_ok("Z_CDC_INIT: Trigger bereits vorhanden (idempotent)")
+                            else:
+                                self._emit_ok("Z_CDC_INIT: Trigger erstellt für ZTLANGTXT")
+                            init_ok = True
+                            summary['Z_CDC_INIT'] = ('ok', 'Getestet (Trigger erstellt)')
+                    except SAPRFCError as e:
+                        self._emit_fail(f"Z_CDC_INIT: {e}")
+                        summary['Z_CDC_INIT'] = ('fail', str(e))
+                    except Exception as e:
+                        self._emit_fail(f"Z_CDC_INIT (unerwartet): {e}")
+                        summary['Z_CDC_INIT'] = ('fail', str(e))
+                else:
+                    self._emit_fail("Z_CDC_INIT nicht gefunden — Init-Test nicht möglich")
+                    summary['Z_CDC_INIT'] = ('fail', 'Nicht gefunden')
+
+                # Z_CDC_READ
+                if init_ok and fm_exists.get("Z_CDC_READ"):
+                    try:
+                        res = conn.call('Z_CDC_READ',
+                                        IV_TABLE='ZTLANGTXT',
+                                        IV_FROM_SEQ=0,
+                                        IV_CHUNK_SIZE=1)
+                        err = res.get('EV_ERROR')
+                        if err:
+                            self._emit_fail(f"Z_CDC_READ: EV_ERROR: {err}")
+                            summary['Z_CDC_READ'] = ('fail', f'EV_ERROR: {err}')
+                        else:
+                            rows = res.get('ET_DATA', [])
+                            next_seq = res.get('EV_NEXT_SEQ', 0)
+                            self._emit_ok(
+                                f"Z_CDC_READ: {len(rows)} Delta-Zeile(n) gelesen "
+                                f"(next_seq={next_seq})"
+                            )
+                            summary['Z_CDC_READ'] = ('ok', f'Getestet ({len(rows)} Delta-Zeilen)')
+                    except SAPRFCError as e:
+                        self._emit_fail(f"Z_CDC_READ: {e}")
+                        summary['Z_CDC_READ'] = ('fail', str(e))
+                    except Exception as e:
+                        self._emit_fail(f"Z_CDC_READ (unerwartet): {e}")
+                        summary['Z_CDC_READ'] = ('fail', str(e))
+                elif not fm_exists.get("Z_CDC_READ"):
+                    self._emit_warn("Z_CDC_READ übersprungen (FM nicht gefunden)")
+                    summary['Z_CDC_READ'] = ('warn', 'Nicht gefunden')
+
+                # Z_CDC_CLEANUP — always run if init was done, to clean up
+                if init_ok and fm_exists.get("Z_CDC_CLEANUP"):
+                    try:
+                        res = conn.call('Z_CDC_CLEANUP',
+                                        IV_TABLE='ZTLANGTXT',
+                                        IV_UP_TO_SEQ=0,
+                                        IV_REMOVE_ALL='X')
+                        err = res.get('EV_ERROR')
+                        if err:
+                            self._emit_fail(f"Z_CDC_CLEANUP: EV_ERROR: {err}")
+                            self._emit_warn("CDC wurde initialisiert aber Cleanup fehlgeschlagen! "
+                                            "Trigger + Log-Tabelle müssen manuell entfernt werden.")
+                            summary['Z_CDC_CLEANUP'] = ('fail', f'EV_ERROR: {err}')
+                        else:
+                            deleted = res.get('EV_DELETED', 0)
+                            self._emit_ok(f"Z_CDC_CLEANUP: CDC entfernt ({deleted} Log-Einträge gelöscht)")
+                            summary['Z_CDC_CLEANUP'] = ('ok', f'Getestet ({deleted} Einträge entfernt)')
+                    except SAPRFCError as e:
+                        self._emit_fail(f"Z_CDC_CLEANUP: {e}")
+                        self._emit_warn("CDC wurde initialisiert aber Cleanup fehlgeschlagen! "
+                                        "Trigger + Log-Tabelle müssen manuell entfernt werden.")
+                        summary['Z_CDC_CLEANUP'] = ('fail', str(e))
+                    except Exception as e:
+                        self._emit_fail(f"Z_CDC_CLEANUP (unerwartet): {e}")
+                        summary['Z_CDC_CLEANUP'] = ('fail', str(e))
+                elif init_ok and not fm_exists.get("Z_CDC_CLEANUP"):
+                    self._emit_fail("Z_CDC_CLEANUP nicht gefunden!")
+                    self._emit_warn("CDC wurde initialisiert aber Z_CDC_CLEANUP fehlt! "
+                                    "Trigger + Log-Tabelle müssen manuell entfernt werden.")
+                    summary['Z_CDC_CLEANUP'] = ('fail', 'Nicht gefunden')
+            else:
+                # Not running init-test; update CDC FM summaries if they exist
+                if 'Z_CDC_INIT' not in summary:
+                    if fm_exists.get("Z_CDC_INIT"):
+                        summary['Z_CDC_INIT'] = ('ok', 'Existiert (nicht getestet)')
+                    else:
+                        summary['Z_CDC_INIT'] = ('fail', 'Nicht gefunden')
+                if 'Z_CDC_READ' not in summary:
+                    if fm_exists.get("Z_CDC_READ"):
+                        summary['Z_CDC_READ'] = ('ok', 'Existiert (nicht getestet)')
+                    else:
+                        summary['Z_CDC_READ'] = ('fail', 'Nicht gefunden')
+                if 'Z_CDC_CLEANUP' not in summary:
+                    if fm_exists.get("Z_CDC_CLEANUP"):
+                        summary['Z_CDC_CLEANUP'] = ('ok', 'Existiert (nicht getestet)')
+                    else:
+                        summary['Z_CDC_CLEANUP'] = ('fail', 'Nicht gefunden')
+
+            # --- Phase 6: Summary ---
+            self._emit("")
+            self._emit_summary(summary)
+
+            # Close connection
+            try:
+                conn.close()
+                self._emit("Verbindung geschlossen.")
+            except Exception:
+                pass
+
+        except Exception as e:
+            self._emit_fail(f"Schwerer Fehler: {e}")
+        finally:
+            self.finished_signal.emit()
+
+    def _emit_summary(self, summary: dict):
+        """Emit the summary table."""
+        self._emit("")
+        self._emit_separator()
+        self._emit_header("=== Zusammenfassung ===")
+        self._emit_separator()
+
+        # Order for the summary
+        order = [
+            'Verbindung',
+            'Z_CDC_INIT',
+            'Z_CDC_READ',
+            'Z_CDC_CLEANUP',
+            'Z_EXPORT_TABLE',
+            'Z_DELETE_FILE',
+            'Z_READ_TABLE',
+            'Z_EXECUTE_SQL',
+            'CDC ZTLANGTXT',
+        ]
+
+        max_label = max(len(k) for k in order) if order else 16
+
+        for key in order:
+            if key not in summary:
+                continue
+            status, detail = summary[key]
+            label = key.ljust(max_label)
+            esc_label = html_module.escape(label)
+            esc_detail = html_module.escape(detail)
+
+            if status == 'ok':
+                marker = '<span style="color:#008800">✓</span>'
+            elif status == 'fail':
+                marker = '<span style="color:#CC0000">✗</span>'
+            elif status == 'warn':
+                marker = '<span style="color:#CC8800">⚠</span>'
+            elif status == 'info':
+                marker = '<span style="color:#0066CC">ℹ</span>'
+            else:
+                marker = '<span style="color:#888">—</span>'
+
+            self.output_signal.emit(
+                f'<span style="font-family: monospace">{esc_label} {marker} {esc_detail}</span>'
+            )
+
+        self._emit_separator()
+
+
+# ============================================================================
+# Diagnose Dialog
+# ============================================================================
+
+class DiagnoseDialog(QDialog):
+    """Modal dialog showing live diagnostic output from DiagnoseWorker.
+
+    Contains:
+      - Read-only QTextEdit with HTML-rich output (colored ✓/✗/⚠/ℹ markers)
+      - Start button (disabled while worker running, shows "Läuft...")
+      - Init-Test checkbox (unchecked by default)
+      - Close button
+    """
+
+    def __init__(self, sap_settings: dict, parent=None):
+        super().__init__(parent)
+        self.sap_settings = sap_settings
+        self.worker = None
+
+        self.setWindowTitle("SAP Diagnose")
+        self.setModal(True)
+        self.setMinimumSize(QSize(600, 400))
+        self.resize(750, 550)
+
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # --- Output area ---
+        self.output = QTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setAcceptRichText(True)
+        self.output.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.output)
+
+        # --- Controls ---
+        ctrl_layout = QHBoxLayout()
+
+        self.init_test_check = QCheckBox("Init-Test (CDC Lifecycle auf ZTLANGTXT)")
+        self.init_test_check.setChecked(False)
+        self.init_test_check.setToolTip(
+            "Erstellt einen CDC-Trigger + Log-Tabelle auf ZTLANGTXT, "
+            "testet Z_CDC_READ, und entfernt alles wieder via Z_CDC_CLEANUP.\n"
+            "Nur aktivieren, wenn Änderungen auf dem SAP-System erlaubt sind."
+        )
+        ctrl_layout.addWidget(self.init_test_check)
+
+        ctrl_layout.addStretch()
+
+        self.btn_start = QPushButton("Start")
+        self.btn_start.clicked.connect(self._start)
+        self.btn_start.setStyleSheet("font-weight: bold;")
+        ctrl_layout.addWidget(self.btn_start)
+
+        self.btn_close = QPushButton("Schließen")
+        self.btn_close.clicked.connect(self.close)
+        ctrl_layout.addWidget(self.btn_close)
+
+        layout.addLayout(ctrl_layout)
+
+    def _start(self):
+        if self.worker and self.worker.isRunning():
+            return
+
+        # Clear output
+        self.output.clear()
+
+        # Disable Start button, show "Läuft..."
+        self.btn_start.setEnabled(False)
+        self.btn_start.setText("Läuft...")
+        self.init_test_check.setEnabled(False)
+
+        init_test = self.init_test_check.isChecked()
+
+        # Create and start worker
+        self.worker = DiagnoseWorker(self.sap_settings, init_test=init_test)
+        self.worker.output_signal.connect(self._on_output)
+        self.worker.finished_signal.connect(self._on_finished)
+        self.worker.start()
+
+    def _on_output(self, html_line: str):
+        self.output.append(html_line)
+
+    def _on_finished(self):
+        self.btn_start.setEnabled(True)
+        self.btn_start.setText("Start")
+        self.init_test_check.setEnabled(True)
+
+    def closeEvent(self, event):
+        # If worker is still running, wait for it to finish
+        if self.worker and self.worker.isRunning():
+            # Try graceful wait (2 seconds)
+            self.worker.wait(2000)
+            if self.worker.isRunning():
+                self.worker.terminate()
+                self.worker.wait(1000)
+        event.accept()
+
+
+# ============================================================================
 # Settings Tab
 # ============================================================================
 
@@ -390,10 +1008,18 @@ class SettingsTab(QWidget):
         self.btn_test_sap.clicked.connect(self._test_sap)
         self.btn_test_sql = QPushButton("SQL Server testen")
         self.btn_test_sql.clicked.connect(self._test_sql)
+        self.btn_diagnose = QPushButton("Diagnose")
+        self.btn_diagnose.setToolTip(
+            "Öffnet einen Dialog, der alle SAP-Funktionsbausteine testet "
+            "(Verbindung, FM-Existenz, Z_READ_TABLE, Z_EXPORT_TABLE, "
+            "Z_EXECUTE_SQL, CDC Status). Optional mit Init-Test."
+        )
+        self.btn_diagnose.clicked.connect(self._open_diagnose)
         btn_layout.addWidget(self.btn_save)
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_test_sap)
         btn_layout.addWidget(self.btn_test_sql)
+        btn_layout.addWidget(self.btn_diagnose)
         layout.addLayout(btn_layout)
 
         layout.addStretch()
@@ -499,6 +1125,20 @@ class SettingsTab(QWidget):
             QMessageBox.information(self, "Erfolg", "SQL Server Verbindung erfolgreich.")
         except Exception as e:
             QMessageBox.critical(self, "Fehler", f"SQL Server Verbindung fehlgeschlagen:\n{e}")
+
+    def _open_diagnose(self):
+        """Open the diagnose dialog with current SAP settings from the form."""
+        # Build SAP settings dict from the form fields (live values, not saved config)
+        sap_settings = {
+            'ashost': self.sap_host.text().strip(),
+            'sysnr': self.sap_sysnr.text().strip() or '00',
+            'client': self.sap_client.text().strip() or '100',
+            'user': self.sap_user.text().strip(),
+            'password': self.sap_password.text(),
+            'lang': self.sap_lang.text().strip() or 'EN',
+        }
+        dialog = DiagnoseDialog(sap_settings, parent=self)
+        dialog.exec()
 
 
 # ============================================================================
