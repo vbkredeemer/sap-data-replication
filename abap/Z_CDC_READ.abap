@@ -19,8 +19,8 @@
 *   EV_ERROR       TYPE STRING     - Fehlermeldung
 *
 * TABLES:
-*   ET_FIELDS      STRUCTURE ZSQL_FIELD - Spaltenmetadaten
-*   ET_DATA        STRUCTURE ZSQL_ROW   - Pipe-delimited: OP|feld1|feld2|...
+*   ET_FIELDS      LIKE ZSQL_FIELD - Spaltenmetadaten
+*   ET_DATA        LIKE ZSQL_ROW   - Pipe-delimited: OP|feld1|feld2|...
 *---------------------------------------------------------------------*
 
 FUNCTION Z_CDC_READ.
@@ -28,26 +28,60 @@ FUNCTION Z_CDC_READ.
 *"*"Lokale Schnittstelle:
 *"  IMPORTING
 *"     VALUE(IV_TABLE) TYPE  TABNAME
-*"     VALUE(IV_FROM_SEQ) TYPE  I DEFAULT 0
-*"     VALUE(IV_CHUNK_SIZE) TYPE  I DEFAULT 10000
+*"     VALUE(IV_FROM_SEQ) TYPE  I
+*"     VALUE(IV_CHUNK_SIZE) TYPE  I
 *"  EXPORTING
 *"     VALUE(EV_ROW_COUNT) TYPE  I
 *"     VALUE(EV_NEXT_SEQ) TYPE  I
 *"     VALUE(EV_HAS_MORE) TYPE  CHAR1
 *"     VALUE(EV_ERROR) TYPE  STRING
 *"  TABLES
-*"     ET_FIELDS STRUCTURE ZSQL_FIELD
-*"     ET_DATA STRUCTURE ZSQL_ROW
+*"      ET_FIELDS STRUCTURE  ZSQL_FIELD
+*"      ET_DATA STRUCTURE  ZSQL_ROW
 *"----------------------------------------------------------------------
 
-  DATA: lv_log_table TYPE tabname,
-        lv_sql TYPE string,
-        ls_field_cat TYPE ZSQL_FIELD,
-        ls_data TYPE ZSQL_ROW,
-        lv_rowdata TYPE string,
-        lv_field_value TYPE string,
-        lv_check_table TYPE string,
-        lv_tabname    TYPE ddobjname.
+  DATA: lv_log_table     TYPE tabname,
+        lv_sql           TYPE string,
+        ls_field_cat     TYPE zsql_field,
+        ls_data          TYPE zsql_row,
+        lv_rowdata       TYPE string,
+        lv_field_value   TYPE string,
+        lv_check_table   TYPE string,
+        lv_tabname       TYPE ddobjname,
+        lv_tab_len       TYPE i,
+        lv_hash_str      TYPE string,
+        lv_short         TYPE string,
+        lv_num_buffer    TYPE c LENGTH 50,
+        lv_colpos        TYPE i,
+        lo_sql_conn      TYPE REF TO cl_sql_connection,
+        lo_sql_stmt      TYPE REF TO cl_sql_statement,
+        lo_result        TYPE REF TO cl_sql_result_set,
+        lv_count         TYPE i,
+        lv_seq           TYPE i,
+        lv_operation     TYPE c LENGTH 1,
+        lv_keyvalues     TYPE string,
+        lv_timestmp      TYPE string,
+        lv_max_seq       TYPE i,
+        lv_skip_entry    TYPE abap_bool,
+        lo_struct_descr  TYPE REF TO cl_abap_structdescr,
+        ls_dynamic       TYPE REF TO data,
+        lt_keys          TYPE TABLE OF string,
+        lv_key_value     TYPE string,
+        lv_where         TYPE string,
+        lv_key_idx       TYPE i,
+        lv_remaining     TYPE i,
+        lr_remaining     TYPE REF TO data.
+
+  DATA: BEGIN OF ls_log_entry,
+          seq       TYPE i,
+          operation TYPE c LENGTH 1,
+          keyvalues TYPE string,
+          timestmp  TYPE string,
+        END OF ls_log_entry,
+        lr_log_entry TYPE REF TO data.
+
+  FIELD-SYMBOLS: <fs_dynamic> TYPE ANY,
+                 <fs_field>   TYPE ANY.
 
   CLEAR: ev_error, ev_row_count, ev_next_seq, ev_has_more.
   CLEAR: et_fields[], et_data[].
@@ -74,19 +108,18 @@ FUNCTION Z_CDC_READ.
   "---------------------------------------------------------------------*
   " Build log table name (must match Z_CDC_INIT logic)
   "---------------------------------------------------------------------*
-  DATA: lv_tab_len TYPE i.
   lv_tab_len = strlen( lv_check_table ).
 
   IF lv_tab_len > 18.
     CALL FUNCTION 'CALCULATE_HASH_FOR_CHAR'
       EXPORTING
-        data = lv_check_table
+        data       = lv_check_table
       IMPORTING
-        hashstring = DATA(lv_hash_str)
+        hashstring = lv_hash_str
       EXCEPTIONS
-        OTHERS = 1.
+        OTHERS     = 1.
     IF sy-subrc = 0 AND strlen( lv_hash_str ) >= 6.
-      DATA(lv_short) = lv_hash_str(6).
+      lv_short = lv_hash_str(6).
     ELSE.
       lv_short = lv_check_table(6).
     ENDIF.
@@ -105,14 +138,11 @@ FUNCTION Z_CDC_READ.
   "---------------------------------------------------------------------
   " Get table metadata via DDIF_NAMETAB_GET (flat list, includes .INCLUDE fields)
   "---------------------------------------------------------------------
-  DATA: lt_nametab TYPE TABLE OF dfies,
-        ls_nametab TYPE dfies,
+  DATA: lt_nametab        TYPE TABLE OF dfies,
+        ls_nametab        TYPE dfies,
         lt_ddic_keyfields TYPE TABLE OF dfies,
-        ls_ddic_key  TYPE dfies.
+        ls_ddic_key       TYPE dfies.
 
-  " PITFALL O48: DDIF_NAMETAB_GET expects TYPE DDOBJNAME, not string.
-  " Passing lv_check_table (string) causes "Typkonflikt bei Aufruf eines
-  " Funktionsbausteins" at runtime. Use lv_tabname (ddobjname) instead.
   lv_tabname = lv_check_table.
 
   CALL FUNCTION 'DDIF_NAMETAB_GET'
@@ -136,7 +166,6 @@ FUNCTION Z_CDC_READ.
   DELETE lt_ddic_keyfields WHERE keyflag <> 'X'.
 
   " Build ET_FIELDS from nametab (flat list, no .INCLUDE nesting issues)
-  DATA: lv_colpos TYPE i.
   lv_colpos = 1.
   LOOP AT lt_nametab INTO ls_nametab.
     CLEAR ls_field_cat.
@@ -174,15 +203,11 @@ FUNCTION Z_CDC_READ.
     ls_field_cat-decimals = ls_nametab-decimals.
     APPEND ls_field_cat TO et_fields.
   ENDLOOP.
+
   "---------------------------------------------------------------------
   " Read log table entries via ADBC
   " Then for each log entry, read the original row
   "---------------------------------------------------------------------
-  DATA: lo_sql_conn TYPE REF TO cl_sql_connection,
-        lo_sql_stmt TYPE REF TO cl_sql_statement,
-        lo_result   TYPE REF TO cl_sql_result_set,
-        lv_count    TYPE i.
-
   TRY.
       lo_sql_conn = cl_sql_connection=>get_connection( ).
       lo_sql_stmt = lo_sql_conn->create_statement( ).
@@ -192,17 +217,10 @@ FUNCTION Z_CDC_READ.
   ENDTRY.
 
   "---------------------------------------------------------------------*
-  " Query log table: get SEQ, OPERATION, KEYVALUES
+  " Query log table: get SEQ, OPERATION, KEYVALUES, TIMESTMP
   "---------------------------------------------------------------------*
   lv_sql = |SELECT SEQ, OPERATION, KEYVALUES, TIMESTMP FROM { lv_log_table }| &&
            | WHERE SEQ > { iv_from_seq } ORDER BY SEQ ASC|.
-
-  " Set max rows instead of LIMIT (ADBC doesn't support LIMIT)
-  TRY.
-      lo_sql_stmt->set_max_rows( iv_chunk_size ).
-    CATCH cx_root.
-      " set_max_rows not available — will use counter in loop
-  ENDTRY.
 
   TRY.
       lo_result = lo_sql_stmt->execute_query( lv_sql ).
@@ -211,26 +229,13 @@ FUNCTION Z_CDC_READ.
       RETURN.
   ENDTRY.
 
+  " Bind structure to result set for ADBC row fetching
+  GET REFERENCE OF ls_log_entry INTO lr_log_entry.
+  lo_result->set_param_struct( lr_log_entry ).
+
   "---------------------------------------------------------------------
-  " Fetch log entries and build result rows
+  " Dynamic structure for original table via RTTS
   "---------------------------------------------------------------------
-  DATA: lv_seq        TYPE i,
-        lv_operation  TYPE c LENGTH 1,
-        lv_keyvalues  TYPE string,
-        lv_timestmp   TYPE string,
-        lv_max_seq    TYPE i,
-        lv_skip_entry TYPE abap_bool.
-
-  FIELD-SYMBOLS: <fs_dynamic> TYPE ANY,
-                 <fs_field>   TYPE ANY.
-
-  " Create dynamic structure for original table via RTTS
-  " describe_by_name gives us a structure handle that matches the DDIC table
-  " layout, so ASSIGN COMPONENT <fieldname> works correctly for all fields
-  " including those that were originally inside .INCLUDE structures.
-  DATA: lo_struct_descr TYPE REF TO cl_abap_structdescr,
-        ls_dynamic      TYPE REF TO data.
-
   TRY.
       lo_struct_descr ?= cl_abap_structdescr=>describe_by_name( lv_tabname ).
     CATCH cx_root INTO DATA(lo_cx_desc).
@@ -243,12 +248,14 @@ FUNCTION Z_CDC_READ.
 
   lv_count = 0.
 
+  "---------------------------------------------------------------------
+  " Fetch log entries and build result rows
+  "---------------------------------------------------------------------
   WHILE lo_result->next( ) > 0.
-    " Read log columns — use get_char for string columns, explicit for int
-    lv_seq = lo_result->get_int( ).
-    lv_operation = lo_result->get_char( ).
-    lv_keyvalues = lo_result->get_char( ).
-    lv_timestmp = lo_result->get_char( ).
+    lv_seq       = ls_log_entry-seq.
+    lv_operation = ls_log_entry-operation.
+    lv_keyvalues = ls_log_entry-keyvalues.
+    lv_timestmp  = ls_log_entry-timestmp.
 
     lv_max_seq = lv_seq.
 
@@ -265,16 +272,9 @@ FUNCTION Z_CDC_READ.
       CONCATENATE lv_rowdata lv_keyvalues INTO lv_rowdata SEPARATED BY '|'.
     ELSE.
       " INSERT or UPDATE: read original row
-      " Parse keyvalues and build WHERE clause
-      DATA: lt_keys TYPE TABLE OF string,
-            lv_key_value TYPE string,
-            lv_where TYPE string,
-            lv_key_idx TYPE i.
-
       SPLIT lv_keyvalues AT '|' INTO TABLE lt_keys.
 
       " Build WHERE from key fields and key values
-      " Key field names already retrieved from DDIC above (lt_ddic_keyfields)
       CLEAR lv_where.
 
       lv_key_idx = 0.
@@ -306,7 +306,6 @@ FUNCTION Z_CDC_READ.
             WHERE (lv_where).
           IF sy-subrc = 0.
             " Build pipe-delimited row from all fields in ET_FIELDS
-            " Type-aware conversion to MSSQL-compatible formats
             LOOP AT et_fields INTO ls_field_cat.
               ASSIGN COMPONENT ls_field_cat-fieldname OF STRUCTURE <fs_dynamic> TO <fs_field>.
               IF sy-subrc = 0.
@@ -322,6 +321,7 @@ FUNCTION Z_CDC_READ.
                         lv_field_value = lv_d.
                       ENDIF.
                     ENDIF.
+
                   WHEN 'T'.
                     " SAP TIME HHMMSS → MSSQL HH:MM:SS
                     IF <fs_field> IS NOT INITIAL.
@@ -332,41 +332,46 @@ FUNCTION Z_CDC_READ.
                         lv_field_value = lv_t.
                       ENDIF.
                     ENDIF.
+
                   WHEN 'I' OR 'INT1' OR 'INT2'.
                     lv_field_value = |{ <fs_field> }|.
                     CONDENSE lv_field_value.
+
                   WHEN 'P'.
                     " Packed decimal with dot, no thousand separators
                     IF <fs_field> IS NOT INITIAL.
-                      WRITE <fs_field> TO lv_field_value NO-GROUPING NO-SIGN.
+                      WRITE <fs_field> TO lv_num_buffer NO-GROUPING NO-SIGN.
+                      lv_field_value = lv_num_buffer.
                       IF <fs_field> < 0.
                         CONCATENATE '-' lv_field_value INTO lv_field_value.
                       ENDIF.
                       REPLACE ALL OCCURRENCES OF ',' IN lv_field_value WITH '.'.
-                      CONDENSE lv_field_value.
-                      SHIFT lv_field_value LEFT DELETING LEADING SPACE.
+                      CONDENSE lv_field_value NO-GAPS.
                     ENDIF.
+
                   WHEN 'F'.
                     " Float with dot notation
                     IF <fs_field> IS NOT INITIAL.
-                      WRITE <fs_field> TO lv_field_value NO-GROUPING NO-SIGN.
+                      WRITE <fs_field> TO lv_num_buffer NO-GROUPING NO-SIGN.
+                      lv_field_value = lv_num_buffer.
                       IF <fs_field> < 0.
                         CONCATENATE '-' lv_field_value INTO lv_field_value.
                       ENDIF.
                       REPLACE ALL OCCURRENCES OF ',' IN lv_field_value WITH '.'.
-                      CONDENSE lv_field_value.
-                      SHIFT lv_field_value LEFT DELETING LEADING SPACE.
+                      CONDENSE lv_field_value NO-GAPS.
                     ENDIF.
+
                   WHEN 'X'.
                     " RAW → hex string with 0x prefix
                     DATA(lv_x) = |{ <fs_field> }|.
                     CONCATENATE '0x' lv_x INTO lv_field_value.
+
                   WHEN OTHERS.
-                    " CHAR/STRING — remove leading/trailing spaces
-                    lv_field_value = |{ <fs_field> }|.
-                    SHIFT lv_field_value RIGHT DELETING TRAILING space.
+                    " CHAR/STRING — remove leading spaces
+                    lv_field_value = <fs_field>.
                     SHIFT lv_field_value LEFT DELETING LEADING space.
                 ENDCASE.
+
                 CONCATENATE lv_rowdata lv_field_value INTO lv_rowdata SEPARATED BY '|'.
               ELSE.
                 CONCATENATE lv_rowdata '' INTO lv_rowdata SEPARATED BY '|'.
@@ -374,13 +379,9 @@ FUNCTION Z_CDC_READ.
             ENDLOOP.
           ELSE.
             " Row not found — INSERT/UPDATE row was deleted before we could read it
-            " Skip this entry — do NOT send DELETE (would corrupt data)
-            " lv_max_seq and lv_count already set above — just skip
             CONTINUE.
           ENDIF.
         CATCH cx_root.
-          " Error reading original row — skip this entry
-          " lv_max_seq and lv_count already set above — just skip
           CONTINUE.
       ENDTRY.
     ENDIF.
@@ -403,7 +404,6 @@ FUNCTION Z_CDC_READ.
   "---------------------------------------------------------------------*
   ev_row_count = lv_count.
   IF lv_count = 0.
-    " No entries found — check if we skipped entries or truly at end
     IF lv_max_seq > 0.
       ev_next_seq = lv_max_seq + 1.
       ev_has_more = 'X'.
@@ -418,16 +418,14 @@ FUNCTION Z_CDC_READ.
       ev_next_seq = lv_max_seq + 1.
     ENDIF.
 
-    " Check if there are more entries — query with iv_from_seq, not lv_max_seq
-    " to avoid counting already-processed entries
-    DATA: lv_remaining TYPE i.
     lv_sql = |SELECT COUNT(*) FROM { lv_log_table } WHERE SEQ > { lv_max_seq }|.
 
     TRY.
         lo_result = lo_sql_stmt->execute_query( lv_sql ).
+        GET REFERENCE OF lv_remaining INTO lr_remaining.
+        lo_result->set_param( lr_remaining ).
         IF lo_result->next( ) > 0.
-          DATA(lv_rem_str) = lo_result->get_char( ).
-          lv_remaining = lv_rem_str.
+          " lv_remaining is populated directly
         ELSE.
           lv_remaining = 0.
         ENDIF.
